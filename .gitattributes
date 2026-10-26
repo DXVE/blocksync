@@ -1,0 +1,7 @@
+# 行尾统一：仓库与工作区都用 LF，避免跨机器的行尾差异进入提交记录
+* text=auto eol=lf
+
+# 二进制文件禁止行尾转换与文本合并
+*.png binary
+*.exe binary
+*.dll binary

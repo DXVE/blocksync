@@ -1,0 +1,35 @@
+# 编译产物：由 build.cmd 生成，不纳入版本库
+/dist/
+*.exe
+*.dll
+*.test
+*.out
+
+# 构建时嵌入界面程序的命令行副本（由 build.cmd 生成）
+/cmd/blocksync-ui/embedded/
+
+# blocksync 运行期状态与中间文件
+.blocksync/
+*.blkpatch
+*.idx
+*.lck
+*.tmp
+*.bak
+*.log
+
+# 虚拟机运行期文件（本地演练可能产生）
+*.vmem
+*.vmss
+*.vmsn
+*.vswp
+
+# 覆盖率与性能剖析
+coverage.*
+*.prof
+
+# 系统与编辑器
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
