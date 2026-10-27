@@ -82,6 +82,7 @@ const (
 	bsPushbutton   = 0x00000000
 	bsAutoCheckbox = 0x00000003
 	bmGetCheck     = 0x00F0
+	bmSetCheck     = 0x00F1
 
 	pbsSmooth  = 0x0001
 	pbsMarquee = 0x0008
@@ -179,12 +180,12 @@ var (
 	uiFont    syscall.Handle
 	scale     = 1.0
 
-	hEditSrc, hEditDst           syscall.Handle
-	hBtnBrowseSrc, hBtnBrowseDst syscall.Handle
-	hBtnSwap                     syscall.Handle
-	hChkVerify, hChkFull         syscall.Handle
-	hBtnSync, hBtnCancel         syscall.Handle
-	hStatus, hProgress, hLog     syscall.Handle
+	hEditSrc, hEditDst            syscall.Handle
+	hBtnBrowseSrc, hBtnBrowseDst  syscall.Handle
+	hBtnSwap                      syscall.Handle
+	hChkVerify, hChkFull          syscall.Handle
+	hBtnSync, hBtnDry, hBtnCancel syscall.Handle
+	hStatus, hProgress, hLog      syscall.Handle
 
 	mu        sync.Mutex
 	logQueue  []string
@@ -199,7 +200,7 @@ var (
 	logChars  int
 
 	reProgress = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
-	reResult   = regexp.MustCompile(`完成(（试运行）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
+	reResult   = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
 )
 
 // confirmMarker 与命令行 blocksync.exe 中的同名常量保持一致：出现该行时子进程在等待确认。
@@ -378,14 +379,24 @@ func startRun(dry, verify, full bool) {
 	}
 
 	mu.Lock()
-	logQueue = nil
+	queued := len(logQueue)
 	progCur, progTotal, progKnown = 0, 0, false
 	finished, exitCode = false, 0
 	cancelled = false
 	mu.Unlock()
-	setText(hLog, "")
-	logChars = 0
-	setText(hStatus, "正在同步…")
+	// 日志区跨运行保留，仅在已有内容时插入分隔行
+	if logChars > 0 || queued > 0 {
+		if dry {
+			appendLog("", "----- 测试比对 -----")
+		} else {
+			appendLog("", "----- 同步 -----")
+		}
+	}
+	if dry {
+		setText(hStatus, "正在比对…")
+	} else {
+		setText(hStatus, "正在同步…")
+	}
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -495,6 +506,7 @@ func confirmBody(lines []string) string {
 
 func setRunningUI(on bool) {
 	enable(hBtnSync, !on)
+	enable(hBtnDry, !on)
 	enable(hBtnBrowseSrc, !on)
 	enable(hBtnBrowseDst, !on)
 	enable(hBtnSwap, !on)
@@ -505,13 +517,9 @@ func setRunningUI(on bool) {
 	enable(hChkFull, !on)
 }
 
-// buildMenu 创建菜单栏：试运行与两个工具项收进菜单，主界面只留同步按钮。
+// buildMenu 创建菜单栏：保存配置与打开目录收进菜单，比对与同步留在主界面。
 func buildMenu() syscall.Handle {
 	menu, _, _ := pCreateMenu.Call()
-
-	act, _, _ := pCreatePopupMenu.Call()
-	pAppendMenuW.Call(act, mfString, idDry, uintptr(unsafe.Pointer(u16("试运行（计算哈希）"))))
-	pAppendMenuW.Call(menu, mfPopup, act, uintptr(unsafe.Pointer(u16("操作"))))
 
 	dir, _, _ := pCreatePopupMenu.Call()
 	pAppendMenuW.Call(dir, mfString, idSave, uintptr(unsafe.Pointer(u16("记住这两个目录"))))
@@ -579,12 +587,12 @@ func flushUI() {
 		} else if code == 0 {
 			if m := reResult.FindStringSubmatch(joined); m != nil {
 				if m[1] != "" {
-					setText(hStatus, fmt.Sprintf("试运行：需改动 %s 个文件、删除 %s 个；读取 %s，预计需写入 %s（未改动数据）", m[3], m[4], m[5], m[6]))
+					setText(hStatus, fmt.Sprintf("测试比对：需改动 %s 个文件、删除 %s 个；读取 %s，预计需写入 %s（未改动数据）", m[3], m[4], m[5], m[6]))
 				} else {
 					setText(hStatus, fmt.Sprintf("完成：改动 %s 个文件、删除 %s 个；读取 %s，写入 %s", m[3], m[4], m[5], m[6]))
 				}
 			} else if strings.Contains(joined, "未改动任何数据") {
-				setText(hStatus, "试运行：没有需要搬运的内容")
+				setText(hStatus, "测试比对：没有需要搬运的内容")
 			} else if strings.Contains(joined, "已是最新") {
 				setText(hStatus, "已是最新，没有需要搬运的内容")
 			} else {
@@ -620,9 +628,11 @@ func onCreate() {
 
 	hChkVerify = create("BUTTON", "写入后复读校验", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 96, 86, 124, 22, idChkVer)
 	hChkFull = create("BUTTON", "忽略修改时间，全量比对", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 236, 86, 180, 22, idChkFull)
+	pSendMessageW.Call(uintptr(hChkVerify), bmSetCheck, 1, 0) // 复读校验默认勾选
 
-	hBtnSync = create("BUTTON", "开始同步", wsChild|wsVisible|wsTabStop|bsPushbutton, 96, 116, 190, 30, idSync)
-	hBtnCancel = create("BUTTON", "取消", wsChild|wsVisible|wsTabStop|bsPushbutton, 296, 116, 76, 30, idCancel)
+	hBtnDry = create("BUTTON", "测试比对（只读）", wsChild|wsVisible|wsTabStop|bsPushbutton, 96, 116, 140, 30, idDry)
+	hBtnSync = create("BUTTON", "开始同步", wsChild|wsVisible|wsTabStop|bsPushbutton, 246, 116, 140, 30, idSync)
+	hBtnCancel = create("BUTTON", "取消", wsChild|wsVisible|wsTabStop|bsPushbutton, 396, 116, 76, 30, idCancel)
 
 	hStatus = create("STATIC", "准备就绪", wsChild|wsVisible, 96, 156, 616, 20, idStatus)
 	hProgress = create("msctls_progress32", "", wsChild|wsVisible|pbsSmooth|pbsMarquee, 96, 180, 616, 16, idProg)

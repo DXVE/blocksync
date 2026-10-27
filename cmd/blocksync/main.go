@@ -46,7 +46,7 @@ const usageText = `blocksync —— 大目录/大文件的块级增量同步
   blocksync setup --show                查看已保存的配置
 
 通用选项:
-  --dry-run     试运行：只报告将搬运多少，不写任何数据文件
+  --dry-run     测试比对：只报告将搬运多少与具体文件，不写任何数据文件
   --verify      写入后复读校验：把写下去的内容读回来重算哈希
   --full        忽略修改时间，全量比对：强制重读所有文件内容
   --workers N   哈希线程数，默认等于 CPU 核数
@@ -931,7 +931,7 @@ func askPlan(p mirror.Plan) (bool, error) {
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	reverse := fs.Bool("reverse", false, "反向：移动硬盘 -> 本机")
-	dry := fs.Bool("dry-run", false, "只报告，不写任何文件")
+	dry := fs.Bool("dry-run", false, "测试比对：只报告，不写任何文件")
 	full := fs.Bool("full", false, "忽略修改时间，全量比对")
 	verify := fs.Bool("verify", false, "写入后复读校验")
 	force := fs.Bool("force", false, "跳过上次遗留的目录锁")
@@ -1015,14 +1015,14 @@ func cmdSync(args []string) error {
 	}
 	if rep.FilesChanged == 0 && rep.FilesDeleted == 0 {
 		if *dry {
-			fmt.Printf("试运行：%d 个文件均无变化，未改动任何数据\n", rep.FilesScanned)
+			fmt.Printf("测试比对：%d 个文件均无变化，未改动任何数据\n", rep.FilesScanned)
 		} else {
 			fmt.Printf("已是最新：%d 个文件均无变化\n", rep.FilesScanned)
 		}
 		return nil
 	}
 	if *dry {
-		fmt.Printf("\n完成（试运行）：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，预计需写入 %s（未改动任何数据）\n",
+		fmt.Printf("\n完成（测试比对）：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，预计需写入 %s（未改动任何数据）\n",
 			rep.FilesScanned, rep.FilesChanged, rep.FilesDeleted,
 			fmtSize(rep.BytesRead), fmtSize(rep.BytesWritten))
 		return nil

@@ -157,11 +157,7 @@ func Run(o Options) (*Report, error) {
 	w := o.workers()
 
 	plan := buildPlan(o, srcFiles, dstMap, dels, dstStore)
-	if o.DryRun {
-		if plan.NeedsConfirm() {
-			fmt.Fprint(out, plan.Summary())
-		}
-	} else {
+	if !o.DryRun {
 		if err := o.checkMassDelete(len(dels), len(srcFiles)); err != nil {
 			return nil, err
 		}
