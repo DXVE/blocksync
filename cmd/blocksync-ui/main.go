@@ -337,6 +337,9 @@ var (
 	proc       *exec.Cmd
 	logChars   int
 
+	lastSrc, lastDst                         string
+	lastDry, lastVerify, lastFull, lastForce bool
+
 	reProgress = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
 	reResult   = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
 
@@ -574,7 +577,13 @@ func flushPendingLog() {
 	appendLogText(lines)
 }
 
-func startRun(dry, verify, full bool) {
+// lockExists 只检查目录锁是否存在，不读取内容。
+func lockExists(dir string) bool {
+	_, err := os.Stat(filepath.Join(state.Dir(dir), "lock"))
+	return err == nil
+}
+
+func startRun(dry, verify, full, force bool) {
 	src := strings.TrimSpace(getText(hEditSrc))
 	dst := strings.TrimSpace(getText(hEditDst))
 	if src == "" || dst == "" {
@@ -601,6 +610,11 @@ func startRun(dry, verify, full bool) {
 	if full {
 		args = append(args, "--full")
 	}
+	if force {
+		args = append(args, "--force")
+	}
+	lastSrc, lastDst = src, dst
+	lastDry, lastVerify, lastFull, lastForce = dry, verify, full, force
 
 	mu.Lock()
 	progCur, progTotal, progKnown = 0, 0, false
@@ -615,6 +629,13 @@ func startRun(dry, verify, full bool) {
 			appendLog("", "----- 测试比对 -----")
 		} else {
 			appendLog("", "----- 同步 -----")
+		}
+	}
+	if dry {
+		for _, d := range []string{src, dst} {
+			if lockExists(d) {
+				appendLog(fmt.Sprintf("提示：检测到目录锁 %s，测试比对只读执行，不受影响", filepath.Join(state.Dir(d), "lock")))
+			}
 		}
 	}
 	if dry {
@@ -1665,6 +1686,21 @@ func flushUI() {
 				setText(hStatus, "完成")
 			}
 		} else {
+			if !lastDry && !lastForce && (lockExists(lastSrc) || lockExists(lastDst)) {
+				var body strings.Builder
+				body.WriteString("同步失败，且目录锁仍然存在：\r\n\r\n")
+				for _, d := range []string{lastSrc, lastDst} {
+					if lockExists(d) {
+						body.WriteString(filepath.Join(state.Dir(d), "lock"))
+						body.WriteString("\r\n")
+					}
+				}
+				body.WriteString("\r\n可能是上次异常退出遗留，也可能另一个同步正在运行。\r\n强制忽略锁并重试一次吗？")
+				if msgBox(body.String(), mbYesNo|mbIconWarning) == idYes {
+					startRun(lastDry, lastVerify, lastFull, true)
+					return
+				}
+			}
 			setText(hStatus, fmt.Sprintf("失败（退出码 %d），详见下面的日志", code))
 		}
 	}
@@ -1772,7 +1808,7 @@ func wndProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
 			f, _, _ := pSendMessageW.Call(uintptr(hChkFull), bmGetCheck, 0, 0)
 			verify := v != 0
 			full := f != 0
-			startRun(wParam&0xFFFF == idDry, verify, full)
+			startRun(wParam&0xFFFF == idDry, verify, full, false)
 		case idCancel:
 			if running && proc != nil && proc.Process != nil {
 				if msgBox("正在同步，确定要中止吗？\r\n\r\n已写入的部分不会回滚，重新运行会接着补齐。",

@@ -363,8 +363,8 @@ func TestEndToEndDivergenceRefused(t *testing.T) {
 	}
 }
 
-// .lck 目录不再阻断同步，也不参与传输（默认排除）。
-func TestEndToEndLckIgnored(t *testing.T) {
+// .lck 目录按普通内容同步，默认排除不包含它。
+func TestEndToEndLckSynced(t *testing.T) {
 	_, a, b, c := setup(t)
 	writeFile(t, filepath.Join(a, "disk.vmdk"), rnd(64*1024, 7))
 	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
@@ -378,8 +378,8 @@ func TestEndToEndLckIgnored(t *testing.T) {
 
 	run(t, "push", a, c, testLBArg, testSBArg)
 	run(t, "apply", b, c)
-	if _, err := os.Stat(filepath.Join(b, "disk.vmdk.lck")); !os.IsNotExist(err) {
-		t.Fatal(".lck 目录不应被同步到对端")
+	if got, err := os.ReadFile(filepath.Join(b, "disk.vmdk.lck", "disk.lck")); err != nil || string(got) != "lock" {
+		t.Fatalf(".lck 目录应随内容同步，实际 err=%v 内容=%q", err, got)
 	}
 	if got, _ := os.ReadFile(filepath.Join(b, "disk.vmdk")); !bytes.Equal(got, rnd(64*1024, 7)) {
 		t.Fatal("数据文件内容不正确")
@@ -507,5 +507,61 @@ func TestEndToEndPairExcludes(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(b, "sub", "cache.tmp")); !os.IsNotExist(err) {
 		t.Fatal("被排除的子目录文件不应被复制")
+	}
+}
+
+func TestSyncRequiresTwoPaths(t *testing.T) {
+	_, a, b, _ := setup(t)
+	runExpectFail(t, "sync", "--yes")
+	runExpectFail(t, "sync", a, "--yes")
+	runExpectFail(t, "sync", a, b, filepath.Join(a, "extra"), "--yes")
+}
+
+func TestSyncReverseSwapsPaths(t *testing.T) {
+	_, a, b, _ := setup(t)
+	writeFile(t, filepath.Join(b, "from-b.txt"), []byte("b"))
+	run(t, "sync", a, b, "--reverse", "--yes")
+	if got, err := os.ReadFile(filepath.Join(a, "from-b.txt")); err != nil || string(got) != "b" {
+		t.Fatalf("--reverse 应从第二个目录同步到第一个，实际 err=%v 内容=%q", err, got)
+	}
+}
+
+func TestPushRejectsSinglePath(t *testing.T) {
+	_, a, _, _ := setup(t)
+	runExpectFail(t, "push", a, testLBArg, testSBArg)
+}
+
+func TestLegacyDirExcludesIgnored(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	_, a, b, _ := setup(t)
+	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
+	writeFile(t, filepath.Join(a, "legacy.txt"), []byte("legacy"))
+	writeFile(t, filepath.Join(a, ".blocksync", "config.json"), []byte(`{"excludes":["legacy.txt"]}`))
+
+	run(t, "sync", a, b, testLBArg, testSBArg, "--yes")
+	if _, err := os.Stat(filepath.Join(b, "legacy.txt")); err != nil {
+		t.Fatal("旧的按目录排除文件应已停用，文件应被同步")
+	}
+}
+
+func TestPushUsesPairExcludes(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	_, a, b, c := setup(t)
+	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
+	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
+	copyTree(t, a, b)
+	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
+
+	writeFile(t, filepath.Join(a, "secret.tmp"), []byte("secret"))
+	cfg := &state.Config{}
+	cfg.SetExcludes(a, c, []string{"*.tmp"})
+	if err := state.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	run(t, "push", a, c, testLBArg, testSBArg)
+	run(t, "apply", b, c)
+	if _, err := os.Stat(filepath.Join(b, "secret.tmp")); !os.IsNotExist(err) {
+		t.Fatal("目录对排除规则应对 push 生效")
 	}
 }

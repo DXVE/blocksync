@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"blocksync/internal/scan"
 )
@@ -236,4 +237,186 @@ func TestVerifyAndSizeShrink(t *testing.T) {
 		t.Fatalf("目标长度应为 250 KiB，实际 %d", st.Size())
 	}
 	equalTrees(t, src, dst)
+}
+
+func TestFirstSyncReadsSourceOnce(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	data := rnd(400*1024, 21)
+	write(t, filepath.Join(src, "a.vmdk"), data)
+
+	rep := run(t, src, dst, false)
+	if rep.BytesRead != uint64(len(data)) {
+		t.Fatalf("首次同步应只读取一次源文件，实际读取 %d 字节", rep.BytesRead)
+	}
+	if rep.BytesWritten != uint64(len(data)) {
+		t.Fatalf("首次同步写入量应为文件大小，实际 %d 字节", rep.BytesWritten)
+	}
+	equalTrees(t, src, dst)
+}
+
+func TestFirstSyncWithVerify(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	data := rnd(300*1024, 26)
+	write(t, filepath.Join(src, "a.vmdk"), data)
+
+	rep, err := Run(Options{Source: src, Target: dst, LB: tLB, SB: tSB, Verify: true, Excludes: scan.DefaultExcludes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.FilesChanged != 1 || rep.BytesWritten != uint64(len(data)) {
+		t.Fatalf("首次同步应写入 1 个文件，实际改动 %d 个、写入 %d 字节", rep.FilesChanged, rep.BytesWritten)
+	}
+	equalTrees(t, src, dst)
+
+	rep, err = Run(Options{Source: src, Target: dst, LB: tLB, SB: tSB, Verify: true, Excludes: scan.DefaultExcludes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.FilesChanged != 0 || rep.BytesRead != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("写后校验后的空操作不应读写，实际改动 %d、读 %d、写 %d", rep.FilesChanged, rep.BytesRead, rep.BytesWritten)
+	}
+}
+
+func TestNoOpSyncKeepsIndexes(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(src, "a.vmdk"), rnd(300*1024, 22))
+	run(t, src, dst, false)
+
+	fixed := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	var files []string
+	for _, root := range []string{src, dst} {
+		idxRoot := filepath.Join(root, ".blocksync", "idx")
+		err := filepath.Walk(idxRoot, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			files = append(files, p)
+			return os.Chtimes(p, fixed, fixed)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("未找到索引文件")
+	}
+
+	run(t, src, dst, false)
+	for _, p := range files {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.ModTime().Equal(fixed) {
+			t.Fatalf("无变化同步不应重写索引: %s", p)
+		}
+	}
+}
+
+func TestMissingSourceIndexDoesNotRewrite(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	data := rnd(300*1024, 23)
+	write(t, filepath.Join(src, "a.vmdk"), data)
+	run(t, src, dst, false)
+
+	if err := os.RemoveAll(filepath.Join(src, ".blocksync", "idx")); err != nil {
+		t.Fatal(err)
+	}
+	rep := run(t, src, dst, false)
+	if rep.FilesChanged != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("源索引缺失不应改写目标，实际改动 %d 个、写入 %d 字节", rep.FilesChanged, rep.BytesWritten)
+	}
+	if rep.BytesRead != uint64(len(data)) {
+		t.Fatalf("源索引缺失应只重读源文件，实际读取 %d 字节", rep.BytesRead)
+	}
+	if rep := run(t, src, dst, false); rep.BytesRead != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("重建索引后应恢复为空操作，实际读取 %d、写入 %d", rep.BytesRead, rep.BytesWritten)
+	}
+}
+
+func TestMissingTargetIndexDoesNotRewrite(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	data := rnd(300*1024, 24)
+	write(t, filepath.Join(src, "a.vmdk"), data)
+	run(t, src, dst, false)
+
+	if err := os.RemoveAll(filepath.Join(dst, ".blocksync", "idx")); err != nil {
+		t.Fatal(err)
+	}
+	rep := run(t, src, dst, false)
+	if rep.FilesChanged != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("目标索引缺失不应改写目标，实际改动 %d 个、写入 %d 字节", rep.FilesChanged, rep.BytesWritten)
+	}
+	if rep.BytesRead != uint64(len(data)) {
+		t.Fatalf("目标索引缺失应只重读目标文件，实际读取 %d 字节", rep.BytesRead)
+	}
+	if rep := run(t, src, dst, false); rep.BytesRead != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("重建索引后应恢复为空操作，实际读取 %d、写入 %d", rep.BytesRead, rep.BytesWritten)
+	}
+}
+
+func TestBothIndexesMissingDoesNotRewrite(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	data := rnd(300*1024, 27)
+	write(t, filepath.Join(src, "a.vmdk"), data)
+	run(t, src, dst, false)
+
+	for _, root := range []string{src, dst} {
+		if err := os.RemoveAll(filepath.Join(root, ".blocksync", "idx")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep := run(t, src, dst, false)
+	if rep.FilesChanged != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("两侧索引缺失但内容一致时不应改写目标，实际改动 %d 个、写入 %d 字节", rep.FilesChanged, rep.BytesWritten)
+	}
+	if rep.BytesRead != 2*uint64(len(data)) {
+		t.Fatalf("两侧索引缺失应各重读一次，实际读取 %d 字节", rep.BytesRead)
+	}
+	if rep := run(t, src, dst, false); rep.BytesRead != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("重建索引后应恢复为空操作，实际读取 %d、写入 %d", rep.BytesRead, rep.BytesWritten)
+	}
+}
+
+func TestIndexesNotRewrittenAfterUpdate(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	p := filepath.Join(src, "a.vmdk")
+	orig := rnd(300*1024, 25)
+	write(t, p, orig)
+	run(t, src, dst, false)
+
+	mod := append([]byte(nil), orig...)
+	copy(mod[1000:1100], []byte("changed"))
+	write(t, p, mod)
+	if rep := run(t, src, dst, false); rep.FilesChanged != 1 {
+		t.Fatalf("应改动 1 个文件，实际 %d", rep.FilesChanged)
+	}
+
+	fixed := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	var files []string
+	for _, root := range []string{src, dst} {
+		idxRoot := filepath.Join(root, ".blocksync", "idx")
+		err := filepath.Walk(idxRoot, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			files = append(files, p)
+			return os.Chtimes(p, fixed, fixed)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rep := run(t, src, dst, false); rep.FilesChanged != 0 || rep.BytesRead != 0 || rep.BytesWritten != 0 {
+		t.Fatalf("增量同步后的空操作不应读写，实际改动 %d、读 %d、写 %d", rep.FilesChanged, rep.BytesRead, rep.BytesWritten)
+	}
+	for _, p := range files {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.ModTime().Equal(fixed) {
+			t.Fatalf("增量同步后的空操作不应重写索引: %s", p)
+		}
+	}
 }

@@ -35,6 +35,14 @@ func hasGlob(s string) bool {
 	return strings.ContainsAny(s, "*?[")
 }
 
+// PathKey 返回路径比较键：Windows 忽略大小写，其他平台原样。
+func PathKey(rel string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(rel)
+	}
+	return rel
+}
+
 // Excluded 判断相对路径是否命中排除规则。
 // 规则按行解释：\ 视为分隔符；行首 \ 锚定根目录，否则匹配任意层级；
 // 行尾 \ 表示目录，命中后整棵子树排除；通配符沿用 path.Match。

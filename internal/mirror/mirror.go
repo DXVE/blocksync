@@ -143,14 +143,14 @@ func Run(o Options) (*Report, error) {
 	inSrc := make(map[string]bool, len(srcFiles))
 	dstMap := make(map[string]scan.Entry, len(dstFiles))
 	for _, f := range srcFiles {
-		inSrc[f.Rel] = true
+		inSrc[scan.PathKey(f.Rel)] = true
 	}
 	for _, f := range dstFiles {
-		dstMap[f.Rel] = f
+		dstMap[scan.PathKey(f.Rel)] = f
 	}
 	var dels []scan.Entry
 	for _, f := range dstFiles {
-		if !inSrc[f.Rel] {
+		if !inSrc[scan.PathKey(f.Rel)] {
 			dels = append(dels, f)
 		}
 	}
@@ -187,15 +187,16 @@ func Run(o Options) (*Report, error) {
 		if err != nil {
 			dstIdx = nil
 		}
-		dstEntry, dstExists := dstMap[f.Rel]
+		dstEntry, dstExists := dstMap[scan.PathKey(f.Rel)]
+		dstFresh := false
 
 		// 目标侧索引必须与目标文件现状一致，否则重扫，避免按过期哈希算区间
 		if dstExists {
-			fresh := dstIdx != nil &&
+			dstFresh = dstIdx != nil &&
 				dstIdx.Size == uint64(dstEntry.Size) &&
 				dstIdx.MtimeNano == dstEntry.MtimeNano &&
 				dstIdx.LB == uint32(o.LB) && dstIdx.SB == uint32(o.SB)
-			if !fresh {
+			if !dstFresh {
 				dres, err := scan.ScanFull(absDstFile, o.LB, o.SB, w)
 				if err != nil {
 					return nil, fmt.Errorf("读取目标文件 %s 失败: %w", f.Rel, err)
@@ -230,11 +231,27 @@ func Run(o Options) (*Report, error) {
 			}
 		}
 
+		copied := false
 		var (
 			ranges []scan.Range
 			newIdx *index.File
 		)
-		if srcFresh {
+		if !o.DryRun && !dstExists && !srcFresh {
+			// 新文件且源索引不可信：一遍读取完成哈希与复制，避免再读一次源文件。
+			if err := o.guardWriteTarget(absDstFile, srcRoot, dstRoot); err != nil {
+				return nil, err
+			}
+			if err := ensureDistinct(absSrcFile, absDstFile); err != nil {
+				return nil, err
+			}
+			nf, err := scan.CopyFull(absSrcFile, absDstFile, o.LB, o.SB)
+			if err != nil {
+				return nil, fmt.Errorf("写入 %s 失败: %w", f.Rel, err)
+			}
+			newIdx = nf
+			copied = true
+			rep.BytesRead += nf.Size
+		} else if srcFresh {
 			// 源索引可信：新索引直接沿用，区间只靠哈希推算，不读文件内容。
 			// 长度不同也要逐块比对，不能整文件重写。
 			newIdx = srcIdx
@@ -250,8 +267,12 @@ func Run(o Options) (*Report, error) {
 		}
 
 		changedBytes := uint64(0)
-		for _, r := range ranges {
-			changedBytes += r.Len
+		if copied {
+			changedBytes = newIdx.Size
+		} else {
+			for _, r := range ranges {
+				changedBytes += r.Len
+			}
 		}
 		// 目标缺失或长度不同时，即使没有变化块也要写一次：覆盖空文件与截断到 0 的情况
 		needWrite := changedBytes > 0 || !dstExists || (dstIdx != nil && dstIdx.Size != uint64(f.Size))
@@ -285,14 +306,16 @@ func Run(o Options) (*Report, error) {
 		if needWrite {
 			rep.BytesWritten += changedBytes
 			if !o.DryRun {
-				if err := o.guardWriteTarget(absDstFile, srcRoot, dstRoot); err != nil {
-					return nil, err
-				}
-				if err := ensureDistinct(absSrcFile, absDstFile); err != nil {
-					return nil, err
-				}
-				if err := copyRanges(absSrcFile, absDstFile, ranges, int64(newIdx.Size), f.MtimeNano); err != nil {
-					return nil, fmt.Errorf("写入 %s 失败: %w", f.Rel, err)
+				if !copied {
+					if err := o.guardWriteTarget(absDstFile, srcRoot, dstRoot); err != nil {
+						return nil, err
+					}
+					if err := ensureDistinct(absSrcFile, absDstFile); err != nil {
+						return nil, err
+					}
+					if err := copyRanges(absSrcFile, absDstFile, ranges, int64(newIdx.Size), f.MtimeNano); err != nil {
+						return nil, fmt.Errorf("写入 %s 失败: %w", f.Rel, err)
+					}
 				}
 				if o.Verify {
 					got, err := scan.ScanFull(absDstFile, o.LB, o.SB, w)
@@ -309,16 +332,20 @@ func Run(o Options) (*Report, error) {
 			continue
 		}
 
-		// 两侧索引各记各自的真实修改时间
-		if err := saveIndex(srcStore, f.Rel, newIdx, f.MtimeNano); err != nil {
-			return nil, err
+		// 只在索引缺失、失效或文件实际写入时保存；未变化文件不重写索引。
+		if !srcFresh {
+			if err := saveIndex(srcStore, f.Rel, newIdx, f.MtimeNano); err != nil {
+				return nil, err
+			}
 		}
-		dstMtime := f.MtimeNano
-		if st, err := os.Stat(absDstFile); err == nil {
-			dstMtime = st.ModTime().UnixNano()
-		}
-		if err := saveIndex(dstStore, f.Rel, newIdx, dstMtime); err != nil {
-			return nil, err
+		if needWrite || (dstExists && !dstFresh) {
+			dstMtime := f.MtimeNano
+			if st, err := os.Stat(absDstFile); err == nil {
+				dstMtime = st.ModTime().UnixNano()
+			}
+			if err := saveIndex(dstStore, f.Rel, newIdx, dstMtime); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -346,7 +373,7 @@ func Run(o Options) (*Report, error) {
 				continue
 			}
 			for _, rel := range list {
-				if !inSrc[rel] {
+				if !inSrc[scan.PathKey(rel)] {
 					_ = st.Delete(rel)
 				}
 			}

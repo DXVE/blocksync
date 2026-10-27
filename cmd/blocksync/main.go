@@ -3,7 +3,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,15 +24,15 @@ import (
 
 const usageText = `blocksync —— 大目录/大文件的块级增量同步
 
-用法（省略目录参数时使用 blocksync setup 保存的两个目录）:
+用法:
 
   blocksync setup                       交互录入本机两个目录，首次必做
   blocksync setup --show                查看当前配置
 
-  blocksync sync [<输入目录> <输出目录>] [--dry-run] [--full] [--verify]
+  blocksync sync <输入目录> <输出目录> [--dry-run] [--full] [--verify]
       把输入目录增量镜像到输出目录：只写变化的块，未变化的文件不读取。
-  blocksync sync --reverse
-      反向同步（移动硬盘 -> 本机），使用已保存的配置。
+  blocksync sync <输入目录> <输出目录> --reverse
+      反向同步：交换两个目录，从第二个目录同步到第一个。
 
   blocksync status [<目录>]             查看该目录的索引与状态
   blocksync verify [<目录>]             全量复算，检查内容与索引是否一致
@@ -41,8 +40,7 @@ const usageText = `blocksync —— 大目录/大文件的块级增量同步
 
 日常流程（同样可在图形界面中点选完成）:
   blocksync setup                       首次：录入并保存两个目录
-  blocksync sync                        离开前：本机 -> 移动硬盘
-  blocksync sync --reverse --verify     到达后：移动硬盘 -> 本机，写后校验
+  blocksync sync "D:\data\project" "E:\backup\project"
   blocksync setup --show                查看已保存的配置
 
 通用选项:
@@ -281,7 +279,10 @@ func runSetup() (*state.Config, error) {
 // resolveTargets 优先使用命令行给出的两个目录，否则读取本机配置，配置缺失时现场录入。
 func resolveTargets(fs *flag.FlagSet, siteName *string) (local, carrier string, err error) {
 	args := fs.Args()
-	if len(args) >= 2 {
+	if len(args) == 1 || len(args) > 2 {
+		return "", "", errors.New("需要两个目录，或省略两个目录使用本机配置")
+	}
+	if len(args) == 2 {
 		local = filepath.Clean(args[0])
 		carrier = filepath.Clean(args[1])
 		return local, carrier, nil
@@ -311,8 +312,8 @@ func resolveTargets(fs *flag.FlagSet, siteName *string) (local, carrier string, 
 	return cfg.LocalDir, carrier, nil
 }
 
-// loadExcludes 汇总排除规则：内置默认 → 目录对的界面配置 → 当前目录的 .blocksync/config.json。
-// other 为同一次同步的另一侧目录，用于查找目录对配置；只有单侧目录时传空串。
+// loadExcludes 汇总排除规则：内置默认 → 目录对的界面配置。
+// other 为同一次同步的另一侧目录；只有单侧目录时传空串。
 func loadExcludes(local, other string) []string {
 	ex := append([]string(nil), scan.DefaultExcludes...)
 	if other != "" {
@@ -320,18 +321,15 @@ func loadExcludes(local, other string) []string {
 			ex = append(ex, cfg.ExcludesFor(local, other)...)
 		}
 	}
-	p := filepath.Join(state.Dir(local), "config.json")
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return ex
-	}
-	var cfg struct {
-		Excludes []string `json:"excludes"`
-	}
-	if json.Unmarshal(b, &cfg) == nil {
-		ex = append(ex, cfg.Excludes...)
-	}
 	return ex
+}
+
+// warnLegacyExcludes 提示旧版按目录存放的排除文件已停用；只检查存在性，不读取内容。
+func warnLegacyExcludes(dir string) {
+	p := filepath.Join(state.Dir(dir), "config.json")
+	if _, err := os.Stat(p); err == nil {
+		fmt.Fprintf(os.Stderr, "提示：%s 已停用，排除规则统一从本机配置读取\n", p)
+	}
 }
 
 func fmtSize(n uint64) string {
@@ -494,6 +492,7 @@ func cmdPush(args []string) error {
 	if st, err := os.Stat(carrier); err != nil || !st.IsDir() {
 		return fmt.Errorf("载波目录不存在: %s", carrier)
 	}
+	warnLegacyExcludes(local)
 	unlock, err := state.Lock(local, *force)
 	if err != nil {
 		return err
@@ -511,7 +510,7 @@ func cmdPush(args []string) error {
 		}
 	}
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludes(local, "")
+	excludes := loadExcludes(local, carrier)
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)
@@ -937,7 +936,7 @@ func askPlan(p mirror.Plan) (bool, error) {
 
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	reverse := fs.Bool("reverse", false, "反向：移动硬盘 -> 本机")
+	reverse := fs.Bool("reverse", false, "交换两个目录，反向同步")
 	dry := fs.Bool("dry-run", false, "测试比对：只报告，不写任何文件")
 	full := fs.Bool("full", false, "忽略修改时间，全量比对")
 	verify := fs.Bool("verify", false, "写入后复读校验")
@@ -952,29 +951,19 @@ func cmdSync(args []string) error {
 		return err
 	}
 
-	var src, dst string
-	if fs.NArg() >= 2 {
-		src = filepath.Clean(fs.Arg(0))
-		dst = filepath.Clean(fs.Arg(1))
-	} else {
-		cfg, err := state.LoadConfig()
-		if err != nil {
-			return err
-		}
-		if cfg == nil || cfg.LocalDir == "" || cfg.CarrierDir == "" {
-			if cfg, err = runSetup(); err != nil {
-				return err
-			}
-		}
-		src, dst = cfg.LocalDir, cfg.CarrierDir
-		if *reverse {
-			src, dst = dst, src
-		}
+	if fs.NArg() != 2 {
+		return errors.New("用法: blocksync sync <输入目录> <输出目录>")
+	}
+	src := filepath.Clean(fs.Arg(0))
+	dst := filepath.Clean(fs.Arg(1))
+	if *reverse {
+		src, dst = dst, src
 	}
 
 	if err := mirror.CheckRoots(src, dst); err != nil {
 		return err
 	}
+	warnLegacyExcludes(src)
 
 	if !*dry {
 		unlockSrc, err := state.Lock(src, *force)
