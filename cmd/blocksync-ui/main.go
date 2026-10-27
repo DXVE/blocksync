@@ -5,8 +5,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -19,6 +17,9 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"blocksync/internal/scan"
+	"blocksync/internal/state"
 )
 
 var (
@@ -28,34 +29,40 @@ var (
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 	ole32    = syscall.NewLazyDLL("ole32.dll")
 
-	pRegisterClassExW     = user32.NewProc("RegisterClassExW")
-	pCreateWindowExW      = user32.NewProc("CreateWindowExW")
-	pDefWindowProcW       = user32.NewProc("DefWindowProcW")
-	pDestroyWindow        = user32.NewProc("DestroyWindow")
-	pShowWindow           = user32.NewProc("ShowWindow")
-	pUpdateWindow         = user32.NewProc("UpdateWindow")
-	pGetMessageW          = user32.NewProc("GetMessageW")
-	pTranslateMessage     = user32.NewProc("TranslateMessage")
-	pDispatchMessageW     = user32.NewProc("DispatchMessageW")
-	pPostQuitMessage      = user32.NewProc("PostQuitMessage")
-	pSendMessageW         = user32.NewProc("SendMessageW")
-	pSetWindowTextW       = user32.NewProc("SetWindowTextW")
-	pGetWindowTextW       = user32.NewProc("GetWindowTextW")
-	pGetWindowTextLengthW = user32.NewProc("GetWindowTextLengthW")
-	pSetTimer             = user32.NewProc("SetTimer")
-	pKillTimer            = user32.NewProc("KillTimer")
-	pMessageBoxW          = user32.NewProc("MessageBoxW")
-	pEnableWindow         = user32.NewProc("EnableWindow")
-	pSetProcessDPIAware   = user32.NewProc("SetProcessDPIAware")
-	pSetDPIAwarenessCtx   = user32.NewProc("SetProcessDpiAwarenessContext")
-	pGetDpiForSystem      = user32.NewProc("GetDpiForSystem")
-	pAdjustWindowRectEx   = user32.NewProc("AdjustWindowRectEx")
-	pCreateMenu           = user32.NewProc("CreateMenu")
-	pCreatePopupMenu      = user32.NewProc("CreatePopupMenu")
-	pAppendMenuW          = user32.NewProc("AppendMenuW")
-	pLoadCursorW          = user32.NewProc("LoadCursorW")
-	pGetSystemMetrics     = user32.NewProc("GetSystemMetrics")
-	pSetWindowPos         = user32.NewProc("SetWindowPos")
+	pRegisterClassExW        = user32.NewProc("RegisterClassExW")
+	pCreateWindowExW         = user32.NewProc("CreateWindowExW")
+	pDefWindowProcW          = user32.NewProc("DefWindowProcW")
+	pDestroyWindow           = user32.NewProc("DestroyWindow")
+	pShowWindow              = user32.NewProc("ShowWindow")
+	pUpdateWindow            = user32.NewProc("UpdateWindow")
+	pGetMessageW             = user32.NewProc("GetMessageW")
+	pTranslateMessage        = user32.NewProc("TranslateMessage")
+	pDispatchMessageW        = user32.NewProc("DispatchMessageW")
+	pPostQuitMessage         = user32.NewProc("PostQuitMessage")
+	pSendMessageW            = user32.NewProc("SendMessageW")
+	pSetWindowTextW          = user32.NewProc("SetWindowTextW")
+	pGetWindowTextW          = user32.NewProc("GetWindowTextW")
+	pGetWindowTextLengthW    = user32.NewProc("GetWindowTextLengthW")
+	pSetTimer                = user32.NewProc("SetTimer")
+	pKillTimer               = user32.NewProc("KillTimer")
+	pMessageBoxW             = user32.NewProc("MessageBoxW")
+	pEnableWindow            = user32.NewProc("EnableWindow")
+	pSetProcessDPIAware      = user32.NewProc("SetProcessDPIAware")
+	pSetDPIAwarenessCtx      = user32.NewProc("SetProcessDpiAwarenessContext")
+	pGetDpiForSystem         = user32.NewProc("GetDpiForSystem")
+	pAdjustWindowRectEx      = user32.NewProc("AdjustWindowRectEx")
+	pCreateMenu              = user32.NewProc("CreateMenu")
+	pCreatePopupMenu         = user32.NewProc("CreatePopupMenu")
+	pAppendMenuW             = user32.NewProc("AppendMenuW")
+	pLoadCursorW             = user32.NewProc("LoadCursorW")
+	pGetSystemMetrics        = user32.NewProc("GetSystemMetrics")
+	pSetWindowPos            = user32.NewProc("SetWindowPos")
+	pGetWindowRect           = user32.NewProc("GetWindowRect")
+	pPostMessageW            = user32.NewProc("PostMessageW")
+	pDialogBoxIndirectParamW = user32.NewProc("DialogBoxIndirectParamW")
+	pEndDialog               = user32.NewProc("EndDialog")
+	pGetDlgItem              = user32.NewProc("GetDlgItem")
+	pSetFocus                = user32.NewProc("SetFocus")
 
 	pCreateFontW  = gdi32.NewProc("CreateFontW")
 	pDeleteObject = gdi32.NewProc("DeleteObject")
@@ -79,20 +86,28 @@ const (
 	esAutohscroll = 0x0080
 	esReadonly    = 0x0800
 
-	bsPushbutton   = 0x00000000
-	bsAutoCheckbox = 0x00000003
-	bmGetCheck     = 0x00F0
-	bmSetCheck     = 0x00F1
+	bsPushbutton    = 0x00000000
+	bsAutoCheckbox  = 0x00000003
+	bsDefPushbutton = 0x00000001
+	bmGetCheck      = 0x00F0
+	bmSetCheck      = 0x00F1
+
+	esWantReturn = 0x1000
+
+	wsPopup   = 0x80000000
+	wsCaption = 0x00C00000
+	wsSysMenu = 0x00080000
 
 	pbsSmooth  = 0x0001
 	pbsMarquee = 0x0008
 
-	wmCreate  = 0x0001
-	wmDestroy = 0x0002
-	wmClose   = 0x0010
-	wmSetFont = 0x0030
-	wmCommand = 0x0111
-	wmTimer   = 0x0113
+	wmCreate     = 0x0001
+	wmInitDialog = 0x0110
+	wmDestroy    = 0x0002
+	wmClose      = 0x0010
+	wmSetFont    = 0x0030
+	wmCommand    = 0x0111
+	wmTimer      = 0x0113
 
 	emSetSel      = 0x00B1
 	emReplaceSel  = 0x00C2
@@ -115,6 +130,15 @@ const (
 	mfSeparator = 0x00000800
 
 	swShow = 5
+
+	swpNoSize   = 0x0001
+	swpNoZOrder = 0x0004
+
+	dsSetFont    = 0x0040
+	dsModalFrame = 0x0080
+	atomButton   = 0x0080
+	atomEdit     = 0x0081
+	atomStatic   = 0x0082
 )
 
 type wndClassEx struct {
@@ -171,7 +195,16 @@ const (
 	idLog     = 1014
 	idSwap    = 1015
 	idOpenSrc = 1016
+	idMenuExc = 1017
 	timerID   = 1
+
+	idExEdit   = 2001
+	idExOk     = 2002
+	idExCancel = 2003
+	idExSample = 2004
+
+	idDlgOk     = 1
+	idDlgCancel = 2
 )
 
 var (
@@ -187,21 +220,38 @@ var (
 	hBtnSync, hBtnDry, hBtnCancel syscall.Handle
 	hStatus, hProgress, hLog      syscall.Handle
 
-	mu        sync.Mutex
-	logQueue  []string
-	progCur   int
-	progTotal int
-	progKnown bool
-	finished  bool
-	exitCode  int
-	running   bool
-	cancelled bool
-	proc      *exec.Cmd
-	logChars  int
+	mu         sync.Mutex
+	logQueue   []string
+	progCur    int
+	progTotal  int
+	progKnown  bool
+	finished   bool
+	exitCode   int
+	procExited bool
+	readerDone bool
+	running    bool
+	cancelled  bool
+	proc       *exec.Cmd
+	logChars   int
 
 	reProgress = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
 	reResult   = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
+
+	hExDlg, hExEdit syscall.Handle
+	exDlgText       string
+	exDlgOK         bool
+	exDlgDone       bool
+	exClassReady    bool
 )
+
+// excludeSample 排除列表的基础示例，首次打开对话框时预填。
+var excludeSample = []string{
+	`\System Volume Information\`,
+	`\$Recycle.Bin\`,
+	`\RECYCLE?\`,
+	`\Recovery\`,
+	`*\thumbs.db`,
+}
 
 // confirmMarker 与命令行 blocksync.exe 中的同名常量保持一致：出现该行时子进程在等待确认。
 const confirmMarker = "需要确认后才会开始写入"
@@ -230,18 +280,22 @@ func setText(h syscall.Handle, s string) {
 	pSetWindowTextW.Call(uintptr(h), uintptr(unsafe.Pointer(u16(s))))
 }
 
-func create(class, text string, style uint32, x, y, w, h int, id int) syscall.Handle {
+func createChild(parent syscall.Handle, class, text string, style uint32, x, y, w, h int, id int) syscall.Handle {
 	r, _, _ := pCreateWindowExW.Call(0,
 		uintptr(unsafe.Pointer(u16(class))),
 		uintptr(unsafe.Pointer(u16(text))),
 		uintptr(style),
 		uintptr(sz(x)), uintptr(sz(y)), uintptr(sz(w)), uintptr(sz(h)),
-		uintptr(mainHwnd), uintptr(id), uintptr(hInstance), 0)
+		uintptr(parent), uintptr(id), uintptr(hInstance), 0)
 	hh := syscall.Handle(r)
 	if uiFont != 0 && hh != 0 {
 		pSendMessageW.Call(uintptr(hh), wmSetFont, uintptr(uiFont), 1)
 	}
 	return hh
+}
+
+func create(class, text string, style uint32, x, y, w, h int, id int) syscall.Handle {
+	return createChild(mainHwnd, class, text, style, x, y, w, h, id)
 }
 
 func enable(h syscall.Handle, on bool) {
@@ -252,47 +306,22 @@ func enable(h syscall.Handle, on bool) {
 	pEnableWindow.Call(uintptr(h), v)
 }
 
-func msgBox(text string, flags uint32) int {
-	r, _, _ := pMessageBoxW.Call(uintptr(mainHwnd),
+func msgBoxOwner(owner syscall.Handle, text string, flags uint32) int {
+	r, _, _ := pMessageBoxW.Call(uintptr(owner),
 		uintptr(unsafe.Pointer(u16(text))),
 		uintptr(unsafe.Pointer(u16("blocksync"))), uintptr(flags))
 	return int(r)
 }
 
+func msgBox(text string, flags uint32) int {
+	return msgBoxOwner(mainHwnd, text, flags)
+}
+
 // ---------- 配置（与命令行共用） ----------
 
-type config struct {
-	LocalDir   string `json:"localDir"`
-	CarrierDir string `json:"carrierDir"`
-}
-
-func configPath() string {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "blocksync", "config.json")
-}
-
-func loadConfig() config {
-	var c config
-	if b, err := os.ReadFile(configPath()); err == nil {
-		b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
-		_ = json.Unmarshal(b, &c)
-	}
-	return c
-}
-
-func saveConfig(c config) error {
-	p := configPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(p, append(b, '\n'), 0o644)
+// currentDirs 返回界面上的输入、输出目录。
+func currentDirs() (string, string) {
+	return strings.TrimSpace(getText(hEditSrc)), strings.TrimSpace(getText(hEditDst))
 }
 
 // ensureExe 把内置主程序释放到临时目录，返回路径与清理函数。
@@ -350,6 +379,32 @@ func appendLog(lines ...string) {
 	mu.Unlock()
 }
 
+// appendLogText 把一组行按顺序写入日志区；仅在界面线程调用。
+func appendLogText(lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	text := strings.Join(lines, "\r\n") + "\r\n"
+	pSendMessageW.Call(uintptr(hLog), emSetSel, ^uintptr(0), ^uintptr(0))
+	pSendMessageW.Call(uintptr(hLog), emReplaceSel, 0, uintptr(unsafe.Pointer(u16(text))))
+	pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
+	logChars += len(text)
+	if logChars > 500000 {
+		setText(hLog, "")
+		setText(hLog, text)
+		logChars = len(text)
+	}
+}
+
+// flushPendingLog 立即写入队列中已有的行；仅在界面线程调用。
+func flushPendingLog() {
+	mu.Lock()
+	lines := logQueue
+	logQueue = nil
+	mu.Unlock()
+	appendLogText(lines)
+}
+
 func startRun(dry, verify, full bool) {
 	src := strings.TrimSpace(getText(hEditSrc))
 	dst := strings.TrimSpace(getText(hEditDst))
@@ -379,13 +434,14 @@ func startRun(dry, verify, full bool) {
 	}
 
 	mu.Lock()
-	queued := len(logQueue)
 	progCur, progTotal, progKnown = 0, 0, false
 	finished, exitCode = false, 0
+	procExited, readerDone = false, false
 	cancelled = false
 	mu.Unlock()
-	// 日志区跨运行保留，仅在已有内容时插入分隔行
-	if logChars > 0 || queued > 0 {
+	// 先把上一次运行遗留的行写入，再插入分隔行，保证先后顺序
+	flushPendingLog()
+	if logChars > 0 {
 		if dry {
 			appendLog("", "----- 测试比对 -----")
 		} else {
@@ -470,6 +526,13 @@ func startRun(dry, verify, full bool) {
 				mu.Unlock()
 			}
 		}
+		// 读端排空且进程已退出，才允许界面开始下一次运行
+		mu.Lock()
+		readerDone = true
+		if procExited {
+			finished = true
+		}
+		mu.Unlock()
 	}()
 
 	go func() {
@@ -486,7 +549,10 @@ func startRun(dry, verify, full bool) {
 			}
 		}
 		mu.Lock()
-		finished, exitCode = true, code
+		exitCode, procExited = code, true
+		if readerDone {
+			finished = true
+		}
 		mu.Unlock()
 	}()
 }
@@ -528,6 +594,10 @@ func buildMenu() syscall.Handle {
 	pAppendMenuW.Call(dir, mfString, idOpen, uintptr(unsafe.Pointer(u16("打开输出目录"))))
 	pAppendMenuW.Call(menu, mfPopup, dir, uintptr(unsafe.Pointer(u16("目录"))))
 
+	settings, _, _ := pCreatePopupMenu.Call()
+	pAppendMenuW.Call(settings, mfString, idMenuExc, uintptr(unsafe.Pointer(u16("排除列表…"))))
+	pAppendMenuW.Call(menu, mfPopup, settings, uintptr(unsafe.Pointer(u16("设置"))))
+
 	return syscall.Handle(menu)
 }
 
@@ -540,6 +610,223 @@ func openFolder(path string) {
 		uintptr(unsafe.Pointer(u16(path))), 0, 0, swShow)
 }
 
+// ---------- 排除列表对话框 ----------
+
+// openExcludeDialog 读取当前目录对的排除列表，编辑确认后写回本机配置。
+func openExcludeDialog() {
+	if running {
+		return
+	}
+	src, dst := currentDirs()
+	if src == "" || dst == "" {
+		msgBox("请先选择输入目录和输出目录。", mbOk|mbIconError)
+		return
+	}
+	initial := strings.Join(excludeSample, "\r\n")
+	if cfg, err := state.LoadConfig(); err == nil && cfg != nil {
+		if list := cfg.ExcludesFor(src, dst); list != nil {
+			initial = strings.Join(list, "\r\n")
+		}
+	}
+	text, ok := showExcludeDialog(initial)
+	if !ok {
+		return
+	}
+	list := splitExcludeLines(text)
+	cfg, err := state.LoadConfig()
+	if err != nil {
+		msgBox("读取配置失败："+err.Error(), mbOk|mbIconError)
+		return
+	}
+	if cfg == nil {
+		cfg = &state.Config{}
+	}
+	cfg.SetExcludes(src, dst, list)
+	if err := state.SaveConfig(cfg); err != nil {
+		msgBox("保存排除列表失败："+err.Error(), mbOk|mbIconError)
+		return
+	}
+	setText(hStatus, fmt.Sprintf("已保存 %d 条排除规则（当前目录对）", len(list)))
+}
+
+// splitExcludeLines 按行拆分并去掉空行。
+func splitExcludeLines(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// validateExcludeText 校验每行规则的写法，返回第一条错误。
+func validateExcludeText(text string) error {
+	for i, line := range splitExcludeLines(text) {
+		if err := scan.ValidatePattern(line); err != nil {
+			return fmt.Errorf("第 %d 行“%s”不是有效规则：%v", i+1, line, err)
+		}
+	}
+	return nil
+}
+
+// showExcludeDialog 用系统模态对话框编辑排除列表；返回文本与是否确认。
+func showExcludeDialog(initial string) (string, bool) {
+	exDlgText, exDlgOK = initial, false
+	tpl := buildExcludeTemplate()
+	ret, _, _ := pDialogBoxIndirectParamW.Call(
+		uintptr(hInstance),
+		uintptr(unsafe.Pointer(&tpl[0])),
+		uintptr(mainHwnd),
+		exDlgCallback(),
+		0)
+	runtime.KeepAlive(tpl)
+	if ret == ^uintptr(0) {
+		msgBox("无法打开排除列表对话框。", mbOk|mbIconError)
+		return initial, false
+	}
+	if !exDlgOK {
+		return initial, false
+	}
+	return exDlgText, true
+}
+
+var (
+	exDlgCbOnce sync.Once
+	exDlgCb     uintptr
+)
+
+// exDlgCallback 复用同一个对话框过程回调，避免重复注册占用回调槽位。
+func exDlgCallback() uintptr {
+	exDlgCbOnce.Do(func() { exDlgCb = syscall.NewCallback(exDlgProc) })
+	return exDlgCb
+}
+
+// exDlgProc 排除列表对话框的窗口过程；激活、焦点与回车/ESC 由系统模态循环处理。
+func exDlgProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
+	switch m {
+	case wmInitDialog:
+		hExDlg = hwnd
+		hExEdit = getDlgItem(hwnd, idExEdit)
+		setText(hExEdit, exDlgText)
+		pSendMessageW.Call(uintptr(hExEdit), emSetLimitTxt, 100000, 0)
+		pSetFocus.Call(uintptr(hExEdit))
+		// 对话框管理器在 WM_INITDIALOG 返回后才设置焦点，异步清掉默认全选
+		pPostMessageW.Call(uintptr(hExEdit), emSetSel, 0, 0)
+		centerOnOwner(hwnd)
+		return 1
+
+	case wmCommand:
+		switch int(wParam & 0xFFFF) {
+		case idExSample:
+			setText(hExEdit, strings.Join(excludeSample, "\r\n"))
+		case idDlgOk:
+			text := getText(hExEdit)
+			if err := validateExcludeText(text); err != nil {
+				msgBoxOwner(hwnd, err.Error(), mbOk|mbIconError)
+				return 1
+			}
+			exDlgText, exDlgOK = text, true
+			pEndDialog.Call(uintptr(hwnd), 1)
+		case idDlgCancel:
+			pEndDialog.Call(uintptr(hwnd), 0)
+		}
+		return 1
+
+	case wmClose:
+		pEndDialog.Call(uintptr(hwnd), 0)
+		return 1
+
+	case wmDestroy:
+		hExDlg, hExEdit = 0, 0
+	}
+	return 0
+}
+
+// buildExcludeTemplate 构造排除列表对话框的内存模板（DLGTEMPLATE），
+// 尺寸使用对话框单位，字体与主界面一致（Segoe UI 9pt）。
+func buildExcludeTemplate() []byte {
+	var b []byte
+	put16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
+	put32 := func(v uint32) { b = append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24)) }
+	putText := func(s string) {
+		u, err := syscall.UTF16FromString(s)
+		if err != nil {
+			u = []uint16{0}
+		}
+		for _, c := range u {
+			b = append(b, byte(c), byte(c>>8))
+		}
+	}
+	align4 := func() {
+		for len(b)%4 != 0 {
+			b = append(b, 0)
+		}
+	}
+
+	put32(dsSetFont | dsModalFrame | wsPopup | wsCaption | wsSysMenu)
+	put32(0)
+	put16(6)
+	put16(0)
+	put16(0)
+	put16(300)
+	put16(190)
+	put16(0)
+	put16(0)
+	putText("排除列表")
+	put16(9)
+	putText("Segoe UI")
+
+	item := func(style uint32, x, y, cx, cy int16, id uint16, class uint16, text string) {
+		align4()
+		put32(style)
+		put32(0)
+		put16(uint16(x))
+		put16(uint16(y))
+		put16(uint16(cx))
+		put16(uint16(cy))
+		put16(id)
+		put16(0xFFFF)
+		put16(class)
+		putText(text)
+		put16(0)
+	}
+
+	item(wsChild|wsVisible, 8, 7, 40, 9, 0xFFFF, atomStatic, "排除:")
+	item(wsChild|wsVisible|wsTabStop|wsBorder|wsVScroll|esMultiline|esAutovscroll|esWantReturn,
+		8, 17, 284, 124, idExEdit, atomEdit, "")
+	item(wsChild|wsVisible|wsTabStop|bsPushbutton, 8, 147, 52, 14, idExSample, atomButton, "填入示例")
+	item(wsChild|wsVisible|wsTabStop|bsDefPushbutton, 176, 147, 52, 14, idDlgOk, atomButton, "确定")
+	item(wsChild|wsVisible|wsTabStop|bsPushbutton, 232, 147, 52, 14, idDlgCancel, atomButton, "取消")
+	item(wsChild|wsVisible, 8, 166, 284, 8, 0xFFFF, atomStatic, `每行一条；\ 为分隔符；行首 \ 锚定根目录；行尾 \ 表示整个目录`)
+	item(wsChild|wsVisible, 8, 176, 284, 8, 0xFFFF, atomStatic, "通配符：* 匹配不含分隔符的任意字符，? 匹配单个字符")
+	align4()
+	return b
+}
+
+func getDlgItem(hwnd syscall.Handle, id int) syscall.Handle {
+	r, _, _ := pGetDlgItem.Call(uintptr(hwnd), uintptr(id))
+	return syscall.Handle(r)
+}
+
+// centerOnOwner 把窗口移到主窗口中央。
+func centerOnOwner(hwnd syscall.Handle) {
+	var dr, mr rect
+	pGetWindowRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&dr)))
+	pGetWindowRect.Call(uintptr(mainHwnd), uintptr(unsafe.Pointer(&mr)))
+	w, h := int(dr.right-dr.left), int(dr.bottom-dr.top)
+	x := int(mr.left) + (int(mr.right-mr.left)-w)/2
+	y := int(mr.top) + (int(mr.bottom-mr.top)-h)/2
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	pSetWindowPos.Call(uintptr(hwnd), 0, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpNoZOrder)
+}
+
 func flushUI() {
 	mu.Lock()
 	lines := logQueue
@@ -549,18 +836,7 @@ func flushUI() {
 	wasCancelled := cancelled
 	mu.Unlock()
 
-	if len(lines) > 0 {
-		text := strings.Join(lines, "\r\n") + "\r\n"
-		pSendMessageW.Call(uintptr(hLog), emSetSel, ^uintptr(0), ^uintptr(0))
-		pSendMessageW.Call(uintptr(hLog), emReplaceSel, 0, uintptr(unsafe.Pointer(u16(text))))
-		pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
-		logChars += len(text)
-		if logChars > 500000 {
-			setText(hLog, "")
-			setText(hLog, text)
-			logChars = len(text)
-		}
-	}
+	appendLogText(lines)
 
 	if known && total > 0 && running {
 		pSendMessageW.Call(uintptr(hProgress), pbmSetMarquee, 0, 0)
@@ -640,7 +916,7 @@ func onCreate() {
 
 	label("日志", 16, 206, 60)
 	hLog = create("EDIT", "",
-		wsChild|wsVisible|wsBorder|wsVScroll|wsHScroll|esMultiline|esAutovscroll|esAutohscroll|esReadonly,
+		wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutovscroll|esReadonly,
 		16, 228, 696, 292, idLog)
 	pSendMessageW.Call(uintptr(hLog), emSetLimitTxt, 2000000, 0)
 
@@ -649,12 +925,14 @@ func onCreate() {
 
 	enable(hBtnCancel, false)
 
-	cfg := loadConfig()
-	if cfg.LocalDir != "" {
-		setText(hEditSrc, cfg.LocalDir)
-	}
-	if cfg.CarrierDir != "" {
-		setText(hEditDst, cfg.CarrierDir)
+	cfg, _ := state.LoadConfig()
+	if cfg != nil {
+		if cfg.LocalDir != "" {
+			setText(hEditSrc, cfg.LocalDir)
+		}
+		if cfg.CarrierDir != "" {
+			setText(hEditDst, cfg.CarrierDir)
+		}
 	}
 	pSetTimer.Call(uintptr(mainHwnd), timerID, 120, 0)
 }
@@ -699,12 +977,23 @@ func wndProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
 				}
 			}
 		case idSave:
-			c := config{LocalDir: strings.TrimSpace(getText(hEditSrc)), CarrierDir: strings.TrimSpace(getText(hEditDst))}
-			if err := saveConfig(c); err != nil {
+			src, dst := currentDirs()
+			cfg, err := state.LoadConfig()
+			if err != nil {
+				msgBox("读取配置失败："+err.Error(), mbOk|mbIconError)
+				return 0
+			}
+			if cfg == nil {
+				cfg = &state.Config{}
+			}
+			cfg.LocalDir, cfg.CarrierDir = src, dst
+			if err := state.SaveConfig(cfg); err != nil {
 				msgBox("保存失败："+err.Error(), mbOk|mbIconError)
 			} else {
 				msgBox("已记住这两个目录，下次打开会自动填好。", mbOk|mbIconInfo)
 			}
+		case idMenuExc:
+			openExcludeDialog()
 		case idOpen:
 			openFolder(strings.TrimSpace(getText(hEditDst)))
 		case idOpenSrc:

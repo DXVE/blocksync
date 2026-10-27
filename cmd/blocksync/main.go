@@ -311,8 +311,15 @@ func resolveTargets(fs *flag.FlagSet, siteName *string) (local, carrier string, 
 	return cfg.LocalDir, carrier, nil
 }
 
-func loadExcludes(local string) []string {
+// loadExcludes 汇总排除规则：内置默认 → 目录对的界面配置 → 当前目录的 .blocksync/config.json。
+// other 为同一次同步的另一侧目录，用于查找目录对配置；只有单侧目录时传空串。
+func loadExcludes(local, other string) []string {
 	ex := append([]string(nil), scan.DefaultExcludes...)
+	if other != "" {
+		if cfg, err := state.LoadConfig(); err == nil {
+			ex = append(ex, cfg.ExcludesFor(local, other)...)
+		}
+	}
 	p := filepath.Join(state.Dir(local), "config.json")
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -400,7 +407,7 @@ func cmdRebuild(args []string, mode string) error {
 		}
 	}
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludes(local)
+	excludes := loadExcludes(local, "")
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)
@@ -504,7 +511,7 @@ func cmdPush(args []string) error {
 		}
 	}
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludes(local)
+	excludes := loadExcludes(local, "")
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)
@@ -1002,7 +1009,7 @@ func cmdSync(args []string) error {
 		Full:            *full,
 		DryRun:          *dry,
 		Verify:          *verify,
-		Excludes:        loadExcludes(src),
+		Excludes:        loadExcludes(src, dst),
 		Out:             progress,
 		AllowMassDelete: *allowMassDelete,
 		Confirm:         confirm,
@@ -1194,7 +1201,7 @@ func cmdVerify(args []string) error {
 
 func verifyDir(local string, workers int, quiet bool) error {
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludes(local)
+	excludes := loadExcludes(local, "")
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)

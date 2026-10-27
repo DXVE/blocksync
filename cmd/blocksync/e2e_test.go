@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"blocksync/internal/state"
 )
 
 var bin string
@@ -473,5 +475,37 @@ func TestEndToEndRandomRounds(t *testing.T) {
 		if siteFile(t, a).SetDigest != siteFile(t, b).SetDigest {
 			t.Fatalf("第 %d 轮后两端摘要不一致", round)
 		}
+	}
+}
+
+// 目录对排除列表：两侧同时生效，被排除的文件不复制、目标侧已有的同名文件不删除。
+func TestEndToEndPairExcludes(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	_, a, b, _ := setup(t)
+	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
+	writeFile(t, filepath.Join(a, "cache.tmp"), []byte("source-excluded"))
+	writeFile(t, filepath.Join(a, "sub", "cache.tmp"), []byte("source-excluded"))
+	writeFile(t, filepath.Join(b, "cache.tmp"), []byte("target-kept"))
+	writeFile(t, filepath.Join(b, "stale.tmp"), []byte("target-kept"))
+
+	cfg := &state.Config{}
+	cfg.SetExcludes(a, b, []string{"*.tmp"})
+	if err := state.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	run(t, "sync", a, b, testLBArg, testSBArg, "--yes")
+
+	if got, _ := os.ReadFile(filepath.Join(b, "keep.txt")); string(got) != "keep" {
+		t.Fatalf("普通文件未同步: %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(b, "cache.tmp")); string(got) != "target-kept" {
+		t.Fatalf("被排除文件被覆盖: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(b, "stale.tmp")); err != nil {
+		t.Fatal("被排除的目标文件不应被删除")
+	}
+	if _, err := os.Stat(filepath.Join(b, "sub", "cache.tmp")); !os.IsNotExist(err) {
+		t.Fatal("被排除的子目录文件不应被复制")
 	}
 }

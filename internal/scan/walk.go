@@ -35,36 +35,113 @@ func hasGlob(s string) bool {
 	return strings.ContainsAny(s, "*?[")
 }
 
-// Excluded 判断相对路径是否命中排除规则；Windows 路径不区分大小写。
+// Excluded 判断相对路径是否命中排除规则。
+// 规则按行解释：\ 视为分隔符；行首 \ 锚定根目录，否则匹配任意层级；
+// 行尾 \ 表示目录，命中后整棵子树排除；通配符沿用 path.Match。
 func Excluded(rel string, excludes []string) bool {
 	if runtime.GOOS == "windows" {
 		rel = strings.ToLower(rel)
 	}
-	base := path.Base(rel)
-	for _, pat := range excludes {
-		if pat == "" {
-			continue
-		}
-		pat = strings.TrimSuffix(pat, "/")
-		if runtime.GOOS == "windows" {
-			pat = strings.ToLower(pat)
-		}
-		if ok, err := path.Match(pat, rel); err == nil && ok {
+	for _, raw := range excludes {
+		if matchRule(rel, raw) {
 			return true
 		}
-		if ok, err := path.Match(pat, base); err == nil && ok {
+	}
+	return false
+}
+
+func matchRule(rel, raw string) bool {
+	r, ok := parseRule(raw)
+	if !ok {
+		return false
+	}
+	if !hasGlob(r.pat) && !r.anchored && !r.dirOnly {
+		// 纯名字：任意层级出现同名条目即排除
+		if rel == r.pat || strings.HasPrefix(rel, r.pat+"/") {
 			return true
 		}
-		if !hasGlob(pat) {
-			if rel == pat || strings.HasPrefix(rel, pat+"/") {
+		for _, seg := range strings.Split(rel, "/") {
+			if seg == r.pat {
 				return true
 			}
-			// 目录名出现在任意层级时整棵子树都排除
-			for _, seg := range strings.Split(rel, "/") {
-				if seg == pat {
-					return true
-				}
+		}
+		return false
+	}
+	if r.dirOnly {
+		for _, dir := range ancestors(rel) {
+			if matchAtLevels(dir, r.pat, r.anchored) {
+				return true
 			}
+		}
+		return false
+	}
+	return matchAtLevels(rel, r.pat, r.anchored)
+}
+
+// excludeRule 一条解析后的排除规则。
+type excludeRule struct {
+	pat      string
+	anchored bool
+	dirOnly  bool
+}
+
+// parseRule 解析单条规则：\ 视作分隔符，行首锚定根目录，行尾表示目录。
+func parseRule(raw string) (excludeRule, bool) {
+	pat := strings.TrimSpace(raw)
+	if pat == "" {
+		return excludeRule{}, false
+	}
+	pat = strings.ReplaceAll(pat, `\`, "/")
+	anchored := strings.HasPrefix(pat, "/")
+	pat = strings.TrimPrefix(pat, "/")
+	dirOnly := strings.HasSuffix(pat, "/")
+	pat = strings.TrimSuffix(pat, "/")
+	if pat == "" || pat == "." || pat == ".." {
+		return excludeRule{}, false
+	}
+	if runtime.GOOS == "windows" {
+		pat = strings.ToLower(pat)
+	}
+	return excludeRule{pat: pat, anchored: anchored, dirOnly: dirOnly}, true
+}
+
+// ValidatePattern 检查单条排除规则的写法是否合法，供界面保存前校验。
+func ValidatePattern(raw string) error {
+	r, ok := parseRule(raw)
+	if !ok {
+		return nil
+	}
+	if _, err := path.Match(r.pat, "x"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ancestors 返回 rel 自身与各级上级目录。
+func ancestors(rel string) []string {
+	out := []string{rel}
+	for i := 0; i < len(rel); i++ {
+		if rel[i] == '/' {
+			out = append(out, rel[:i])
+		}
+	}
+	return out
+}
+
+// matchAtLevels 整体匹配路径；未锚定时对每一段后缀尝试，* 前缀可匹配根层。
+func matchAtLevels(rel, pat string, anchored bool) bool {
+	cands := []string{rel, "/" + rel}
+	if !anchored {
+		for i := 0; i < len(rel); i++ {
+			if rel[i] == '/' {
+				s := rel[i+1:]
+				cands = append(cands, s, "/"+s)
+			}
+		}
+	}
+	for _, c := range cands {
+		if ok, err := path.Match(pat, c); err == nil && ok {
+			return true
 		}
 	}
 	return false
