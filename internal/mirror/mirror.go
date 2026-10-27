@@ -285,7 +285,7 @@ func Run(o Options) (*Report, error) {
 		if needWrite {
 			rep.BytesWritten += changedBytes
 			if !o.DryRun {
-				if err := o.guardTarget(absDstFile, srcRoot, dstRoot); err != nil {
+				if err := o.guardWriteTarget(absDstFile, srcRoot, dstRoot); err != nil {
 					return nil, err
 				}
 				if err := ensureDistinct(absSrcFile, absDstFile); err != nil {
@@ -379,17 +379,35 @@ func CheckRoots(src, dst string) error {
 	return nil
 }
 
-// canonicalPath 规范化路径：绝对路径、解析链接与联接、Windows 下统一大小写，
-// 使两个指向同一位置的不同写法可以比较。
+// canonicalPath 规范化路径：拿句柄解析联接后的最终位置，Windows 下统一大小写，
+// 使两个指向同一位置的不同写法可以比较；解析失败直接报错。
 func canonicalPath(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", err
 	}
-	if r, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = r
+	return resolvePath(abs)
+}
+
+// resolvePath 返回路径的最终位置；末级不存在时以最近的已存在上级为基准拼接剩余部分。
+func resolvePath(abs string) (string, error) {
+	cur := filepath.Clean(abs)
+	rest := ""
+	for {
+		final, _, exists, err := probePath(cur)
+		if err != nil {
+			return "", fmt.Errorf("解析路径 %s 失败: %w", abs, err)
+		}
+		if exists {
+			return normalizePath(filepath.Join(final, rest)), nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("无法解析路径: %s", abs)
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
 	}
-	return normalizePath(abs), nil
 }
 
 func normalizePath(p string) string {
@@ -398,27 +416,6 @@ func normalizePath(p string) string {
 		p = strings.ToLower(p)
 	}
 	return p
-}
-
-// realPath 返回路径解析链接后的真实位置；路径尚不存在时解析最近的已存在上级目录。
-func realPath(p string) (string, error) {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
-	cur := filepath.Clean(abs)
-	rest := ""
-	for {
-		if r, err := filepath.EvalSymlinks(cur); err == nil {
-			return normalizePath(filepath.Join(r, rest)), nil
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return normalizePath(p), nil
-		}
-		rest = filepath.Join(filepath.Base(cur), rest)
-		cur = parent
-	}
 }
 
 func isWithin(root, p string) bool {
@@ -432,17 +429,36 @@ func isWithin(root, p string) bool {
 	return strings.HasPrefix(p, root)
 }
 
-// guardTarget 在每次写入或删除前独立校验：不得落在输入目录，且必须在输出目录内。
+// guardTarget 在每次删除前独立校验：不得落在输入目录，且必须在输出目录内。
 func (o *Options) guardTarget(abs, srcRoot, dstRoot string) error {
-	real, err := realPath(abs)
+	return guardLocation(abs, srcRoot, dstRoot, false)
+}
+
+// guardWriteTarget 在每次写入前校验位置，并拒绝有多个硬链接的目标文件：
+// 写入这类文件会改动同一份数据的其他路径。
+func (o *Options) guardWriteTarget(abs, srcRoot, dstRoot string) error {
+	return guardLocation(abs, srcRoot, dstRoot, true)
+}
+
+// guardLocation 按句柄解析出的最终路径校验位置；解析失败一律中止，不再按字符串路径放行。
+func guardLocation(abs, srcRoot, dstRoot string, forWrite bool) error {
+	final, links, exists, err := probePath(abs)
 	if err != nil {
+		return fmt.Errorf("无法确认 %s 的实际位置: %w", abs, err)
+	}
+	if exists {
+		final = normalizePath(final)
+	} else if final, err = resolvePath(abs); err != nil {
 		return err
 	}
-	if isWithin(srcRoot, real) {
+	if isWithin(srcRoot, final) {
 		return fmt.Errorf("已阻止写入 %s：该路径位于输入目录内，疑似输入/输出目录嵌套", abs)
 	}
-	if !isWithin(dstRoot, real) {
+	if !isWithin(dstRoot, final) {
 		return fmt.Errorf("已阻止写入 %s：该路径不在输出目录内", abs)
+	}
+	if forWrite && exists && links > 1 {
+		return fmt.Errorf("已阻止写入 %s：该文件有 %d 个硬链接，写入会改动同一份数据的其他路径", abs, links)
 	}
 	return nil
 }
