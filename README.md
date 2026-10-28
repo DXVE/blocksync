@@ -74,7 +74,7 @@ dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project"
 
 | 命令 | 作用 |
 |---|---|
-| `blocksync sync <输入> <输出>` | 把输入目录增量镜像到输出目录，`--reverse` 反向 |
+| `blocksync sync <输入> <输出>` | 把输入目录增量镜像到输出目录；反向同步交换参数顺序 |
 | `blocksync setup` | 交互录入或修改本机的两个目录（供 verify/repair/status 与 GUI 使用） |
 | `blocksync status / verify / repair <目录>` | 查看索引覆盖 / 校验一致性 / 重建索引 |
 

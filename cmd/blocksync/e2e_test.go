@@ -357,15 +357,6 @@ func TestSyncRequiresTwoPaths(t *testing.T) {
 	runExpectFail(t, "sync", a, b, filepath.Join(a, "extra"), "--yes")
 }
 
-func TestSyncReverseSwapsPaths(t *testing.T) {
-	_, a, b := setup(t)
-	writeFile(t, filepath.Join(b, "from-b.txt"), []byte("b"))
-	run(t, "sync", a, b, "--reverse", "--yes")
-	if got, err := os.ReadFile(filepath.Join(a, "from-b.txt")); err != nil || string(got) != "b" {
-		t.Fatalf("--reverse 应从第二个目录同步到第一个，实际 err=%v 内容=%q", err, got)
-	}
-}
-
 func TestLegacyDirExcludesIgnored(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	_, a, b := setup(t)

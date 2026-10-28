@@ -26,8 +26,7 @@ const usageText = `blocksync —— 大目录/大文件的块级增量同步
 
   blocksync sync <输入目录> <输出目录> [--dry-run] [--full] [--verify]
       把输入目录增量镜像到输出目录：只写变化的块，未变化的文件不读取。
-  blocksync sync <输入目录> <输出目录> --reverse
-      反向同步：交换两个目录，从第二个目录同步到第一个。
+      反向同步交换两个参数的顺序即可。
 
   blocksync status [<目录>]             查看该目录的索引与状态
   blocksync verify [<目录>]             全量复算，检查内容与索引是否一致
@@ -388,7 +387,6 @@ func askPlan(p mirror.Plan) (bool, error) {
 
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	reverse := fs.Bool("reverse", false, "交换两个目录，反向同步")
 	dry := fs.Bool("dry-run", false, "测试比对：只报告，不写任何文件")
 	full := fs.Bool("full", false, "忽略修改时间，全量比对")
 	verify := fs.Bool("verify", false, "写入后复读校验")
@@ -408,9 +406,6 @@ func cmdSync(args []string) error {
 	}
 	src := filepath.Clean(fs.Arg(0))
 	dst := filepath.Clean(fs.Arg(1))
-	if *reverse {
-		src, dst = dst, src
-	}
 
 	if err := mirror.CheckRoots(src, dst); err != nil {
 		return err
