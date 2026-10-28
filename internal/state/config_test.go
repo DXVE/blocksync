@@ -40,7 +40,7 @@ func TestSetExcludesKeepsOtherPairs(t *testing.T) {
 
 func TestConfigRoundTrip(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
-	c := &Config{LocalDir: `C:\a`, CarrierDir: `E:\a`, SiteID: "site-1"}
+	c := &Config{LocalDir: `C:\a`, CarrierDir: `E:\a`}
 	c.SetExcludes(`C:\a`, `E:\a`, []string{`\Recovery\`, `*\thumbs.db`})
 	if err := SaveConfig(c); err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.SiteID != "site-1" || len(got.ExcludesFor(`E:\a`, `C:\a`)) != 2 {
+	if len(got.ExcludesFor(`E:\a`, `C:\a`)) != 2 {
 		t.Fatalf("配置往返失败: %+v", got)
 	}
 }

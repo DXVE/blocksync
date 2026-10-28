@@ -1,4 +1,4 @@
-// 本机配置（生效目录、站点标识、按目录对排除规则、具名配置）的读写，存放于用户本地配置目录，不随项目目录复制。
+// 本机配置（生效目录、按目录对排除规则、具名配置）的读写，存放于用户本地配置目录，不随项目目录复制。
 package state
 
 import (
@@ -12,12 +12,11 @@ import (
 	"strings"
 )
 
-// Config 本机运行所需的路径、站点标识、按目录对保存的排除规则与具名配置。
+// Config 本机运行所需的路径、按目录对保存的排除规则与具名配置。
 // LocalDir/CarrierDir 始终表示当前生效的一对目录，命令行同步只读取它们。
 type Config struct {
 	LocalDir      string       `json:"localDir"`
 	CarrierDir    string       `json:"carrierDir"`
-	SiteID        string       `json:"siteId"`
 	ExcludeSets   []ExcludeSet `json:"excludeSets,omitempty"`
 	Profiles      []Profile    `json:"profiles,omitempty"`
 	ActiveProfile string       `json:"activeProfile,omitempty"`

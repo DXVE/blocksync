@@ -1,4 +1,4 @@
-// 并行块哈希与差异比对；粗块先筛掉未变区域，仅对命中的粗块逐细块比较。
+// 并行块哈希与差异区间计算；一次读取同时求两级哈希，按细块哈希比较定位变化。
 package scan
 
 import (
@@ -286,45 +286,6 @@ func RangesAgainst(a, b *index.File) []Range {
 	}
 	flush()
 	return ranges
-}
-
-// RangesBetween 仅凭两份索引算出需要从 a 复制到 b 的区间，不读取任何文件内容。
-func RangesBetween(a, b *index.File) ([]Range, uint64) {
-	if a == nil || b == nil || a.LB != b.LB || a.SB != b.SB || a.Size != b.Size {
-		return nil, 0
-	}
-	sbSize := int64(a.SB)
-	n := a.NSB()
-	var ranges []Range
-	var changed uint64
-	var runStart, runEnd int64 = -1, 0
-	flush := func() {
-		if runStart >= 0 {
-			ranges = append(ranges, Range{Off: uint64(runStart), Len: uint64(runEnd - runStart)})
-			changed += uint64(runEnd - runStart)
-			runStart = -1
-		}
-	}
-	for i := int64(0); i < n; i++ {
-		off := i * sbSize
-		ln := sbSize
-		if off+ln > int64(a.Size) {
-			ln = int64(a.Size) - off
-		}
-		if ln <= 0 {
-			break
-		}
-		if bytes.Equal(a.SBHash(i), b.SBHash(i)) {
-			flush()
-			continue
-		}
-		if runStart < 0 {
-			runStart = off
-		}
-		runEnd = off + ln
-	}
-	flush()
-	return ranges, changed
 }
 
 // RangesAll 返回覆盖整个文件的单个区间。

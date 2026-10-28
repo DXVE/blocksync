@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -75,94 +74,41 @@ func writeFile(t *testing.T, p string, data []byte) {
 	}
 }
 
-// copyTree 复制目录内容，跳过 .blocksync（模拟一次性全量拷贝到对端）。
-func copyTree(t *testing.T, src, dst string) {
+// readTree 读取目录内容（忽略 .blocksync），用于内容快照与比较。
+func readTree(t *testing.T, root string) map[string][]byte {
 	t.Helper()
-	err := filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
+	out := map[string][]byte{}
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(src, p)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if rel == ".blocksync" || strings.HasPrefix(rel, ".blocksync"+string(filepath.Separator)) {
-			if info.IsDir() {
+		rel, _ := filepath.Rel(root, p)
+		if rel == "." || rel == ".blocksync" || strings.HasPrefix(rel, ".blocksync"+string(filepath.Separator)) {
+			if info.IsDir() && rel != "." {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		target := filepath.Join(dst, rel)
 		if info.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			return nil
 		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, b, 0o644)
+		out[filepath.ToSlash(rel)] = b
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-}
-
-func siteFile(t *testing.T, local string) struct {
-	SiteID     string `json:"siteId"`
-	Generation uint64 `json:"generation"`
-	SetDigest  string `json:"setDigest"`
-} {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(local, ".blocksync", "site.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var s struct {
-		SiteID     string `json:"siteId"`
-		Generation uint64 `json:"generation"`
-		SetDigest  string `json:"setDigest"`
-	}
-	if err := json.Unmarshal(b, &s); err != nil {
-		t.Fatal(err)
-	}
-	return s
+	return out
 }
 
 // assertTreesEqual 比较两个目录的文件内容（忽略 .blocksync）。
 func assertTreesEqual(t *testing.T, a, b string) {
 	t.Helper()
-	read := func(root string) map[string][]byte {
-		out := map[string][]byte{}
-		err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			rel, _ := filepath.Rel(root, p)
-			if rel == "." || rel == ".blocksync" || strings.HasPrefix(rel, ".blocksync"+string(filepath.Separator)) {
-				if info.IsDir() && rel != "." {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if info.IsDir() {
-				return nil
-			}
-			b, err := os.ReadFile(p)
-			if err != nil {
-				return err
-			}
-			out[filepath.ToSlash(rel)] = b
-			return nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return out
-	}
-	ta, tb := read(a), read(b)
+	ta, tb := readTree(t, a), readTree(t, b)
 	if len(ta) != len(tb) {
 		t.Fatalf("文件数量不同: %d vs %d\nA=%v\nB=%v", len(ta), len(tb), keys(ta), keys(tb))
 	}
@@ -190,13 +136,12 @@ const (
 	testSBArg = "--sb=4096"
 )
 
-func setup(t *testing.T) (root, a, b, c string) {
+func setup(t *testing.T) (root, a, b string) {
 	t.Helper()
 	root = t.TempDir()
 	a = filepath.Join(root, "siteA", "vm")
 	b = filepath.Join(root, "siteB", "vm")
-	c = filepath.Join(root, "carrier")
-	for _, d := range []string{a, b, c} {
+	for _, d := range []string{a, b} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -205,26 +150,14 @@ func setup(t *testing.T) (root, a, b, c string) {
 }
 
 func TestEndToEndRoundTrip(t *testing.T) {
-	_, a, b, c := setup(t)
+	_, a, b := setup(t)
 
 	writeFile(t, filepath.Join(a, "disk-s001.vmdk"), rnd(1536*1024, 1))
 	writeFile(t, filepath.Join(a, "disk-s002.vmdk"), rnd(700*1024, 2))
 	writeFile(t, filepath.Join(a, "vm.vmx"), []byte("config.version = \"8\"\ndisplayName = \"dev\"\n"))
 
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
-	copyTree(t, a, b)
-	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
-
-	if siteFile(t, a).SetDigest != siteFile(t, b).SetDigest {
-		t.Fatal("两端内容一致时状态摘要必须相同")
-	}
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
 	assertTreesEqual(t, a, b)
-
-	// 无改动时 push 应报告无需搬运
-	out := run(t, "push", a, c, testLBArg, testSBArg)
-	if !strings.Contains(out, "无需搬运") {
-		t.Fatalf("未改动时应报告无需搬运，实际输出:\n%s", out)
-	}
 
 	// 做几处小改动
 	p1 := filepath.Join(a, "disk-s001.vmdk")
@@ -239,38 +172,24 @@ func TestEndToEndRoundTrip(t *testing.T) {
 
 	writeFile(t, filepath.Join(a, "vm.vmx"), []byte("config.version = \"8\"\ndisplayName = \"dev-2\"\n"))
 
-	// dry-run 不应产生任何补丁
-	run(t, "push", a, c, "--dry-run", testLBArg, testSBArg)
-	if pats, _ := filepath.Glob(filepath.Join(c, "blocksync", "A", "*.blkpatch")); len(pats) != 0 {
-		t.Fatalf("dry-run 不应写出补丁，实际 %v", pats)
+	// 测试比对不应改动任何数据文件
+	before := readTree(t, b)
+	out := run(t, "sync", a, b, "--dry-run", "--yes", testLBArg, testSBArg)
+	if !strings.Contains(out, "测试比对") {
+		t.Fatalf("应输出测试比对结果，实际:\n%s", out)
+	}
+	after := readTree(t, b)
+	if len(before) != len(after) {
+		t.Fatalf("测试比对改动了文件数量: %d -> %d", len(before), len(after))
+	}
+	for k, v := range before {
+		if !bytes.Equal(v, after[k]) {
+			t.Fatalf("测试比对改动了文件: %s", k)
+		}
 	}
 
-	run(t, "push", a, c, testLBArg, testSBArg)
-	pats, _ := filepath.Glob(filepath.Join(c, "blocksync", "A", "*.blkpatch"))
-	if len(pats) != 1 {
-		t.Fatalf("应生成 1 个补丁，实际 %v", pats)
-	}
-	st, err := os.Stat(pats[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Size() > 120*1024 {
-		t.Fatalf("补丁体积应远小于数据量，实际 %d 字节", st.Size())
-	}
-	t.Logf("补丁体积 %d 字节（原始数据 %d 字节）", st.Size(), 1536*1024+700*1024)
-
-	run(t, "apply", b, c, "--verify")
+	run(t, "sync", a, b, "--yes", "--verify", testLBArg, testSBArg)
 	assertTreesEqual(t, a, b)
-
-	if siteFile(t, a).SetDigest != siteFile(t, b).SetDigest {
-		t.Fatal("同步后两端摘要必须相同")
-	}
-
-	// 应用后再推一次应无变更
-	out = run(t, "push", b, c, testLBArg, testSBArg)
-	if !strings.Contains(out, "无需搬运") {
-		t.Fatalf("对端应用后应无变更，实际输出:\n%s", out)
-	}
 
 	if out := run(t, "verify", b); !strings.Contains(out, "校验通过") {
 		t.Fatalf("verify 应通过，实际:\n%s", out)
@@ -278,18 +197,15 @@ func TestEndToEndRoundTrip(t *testing.T) {
 }
 
 func TestEndToEndDelete(t *testing.T) {
-	_, a, b, c := setup(t)
+	_, a, b := setup(t)
 	writeFile(t, filepath.Join(a, "keep.vmdk"), rnd(200*1024, 3))
 	writeFile(t, filepath.Join(a, "drop.vmdk"), rnd(200*1024, 4))
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
-	copyTree(t, a, b)
-	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
 
 	if err := os.Remove(filepath.Join(a, "drop.vmdk")); err != nil {
 		t.Fatal(err)
 	}
-	run(t, "push", a, c, testLBArg, testSBArg)
-	run(t, "apply", b, c)
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
 
 	if _, err := os.Stat(filepath.Join(b, "drop.vmdk")); !os.IsNotExist(err) {
 		t.Fatal("删除未同步到对端")
@@ -297,87 +213,17 @@ func TestEndToEndDelete(t *testing.T) {
 	assertTreesEqual(t, a, b)
 }
 
-func TestEndToEndChain(t *testing.T) {
-	_, a, b, c := setup(t)
-	writeFile(t, filepath.Join(a, "disk.vmdk"), rnd(300*1024, 5))
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
-	copyTree(t, a, b)
-	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
-
-	// 连续两次推送，一次应用应把两段补丁都吃掉
-	p := filepath.Join(a, "disk.vmdk")
-	d, _ := os.ReadFile(p)
-	d[500] ^= 1
-	writeFile(t, p, d)
-	run(t, "push", a, c, testLBArg, testSBArg)
-
-	d[90000] ^= 2
-	writeFile(t, p, d)
-	run(t, "push", a, c, testLBArg, testSBArg)
-
-	pats, _ := filepath.Glob(filepath.Join(c, "blocksync", "A", "*.blkpatch"))
-	if len(pats) != 2 {
-		t.Fatalf("应有 2 个补丁，实际 %d", len(pats))
-	}
-
-	run(t, "apply", b, c)
-	assertTreesEqual(t, a, b)
-	if siteFile(t, a).SetDigest != siteFile(t, b).SetDigest {
-		t.Fatal("链式应用后摘要必须一致")
-	}
-}
-
-func TestEndToEndDivergenceRefused(t *testing.T) {
-	_, a, b, c := setup(t)
-	writeFile(t, filepath.Join(a, "disk.vmdk"), rnd(200*1024, 6))
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
-	copyTree(t, a, b)
-	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
-
-	p := filepath.Join(a, "disk.vmdk")
-	d, _ := os.ReadFile(p)
-	d[100] ^= 1
-	writeFile(t, p, d)
-	run(t, "push", a, c, testLBArg, testSBArg)
-
-	d[200] ^= 2
-	writeFile(t, p, d)
-	run(t, "push", a, c, testLBArg, testSBArg)
-
-	// 删掉第一段补丁，制造断链
-	pats, _ := filepath.Glob(filepath.Join(c, "blocksync", "A", "*.blkpatch"))
-	if len(pats) != 2 {
-		t.Fatalf("应有 2 个补丁，实际 %d", len(pats))
-	}
-	if err := os.Remove(pats[0]); err != nil {
-		t.Fatal(err)
-	}
-
-	out := runExpectFail(t, "apply", b, c)
-	if !strings.Contains(out, "不衔接") {
-		t.Fatalf("应报告补丁链不衔接，实际:\n%s", out)
-	}
-	// 目标端内容不能被改动
-	if got, _ := os.ReadFile(filepath.Join(b, "disk.vmdk")); !bytes.Equal(got, rnd(200*1024, 6)) {
-		t.Fatal("拒绝应用时不应改动目标文件")
-	}
-}
-
 // .lck 目录按普通内容同步，默认排除不包含它。
 func TestEndToEndLckSynced(t *testing.T) {
-	_, a, b, c := setup(t)
+	_, a, b := setup(t)
 	writeFile(t, filepath.Join(a, "disk.vmdk"), rnd(64*1024, 7))
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
-	copyTree(t, a, b)
-	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
 
 	if err := os.MkdirAll(filepath.Join(a, "disk.vmdk.lck"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(a, "disk.vmdk.lck", "disk.lck"), []byte("lock"))
 
-	run(t, "push", a, c, testLBArg, testSBArg)
-	run(t, "apply", b, c)
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
 	if got, err := os.ReadFile(filepath.Join(b, "disk.vmdk.lck", "disk.lck")); err != nil || string(got) != "lock" {
 		t.Fatalf(".lck 目录应随内容同步，实际 err=%v 内容=%q", err, got)
 	}
@@ -386,23 +232,22 @@ func TestEndToEndLckSynced(t *testing.T) {
 	}
 }
 
-func TestEndToEndWithoutInit(t *testing.T) {
-	_, a, b, c := setup(t)
+// 未预先跑 repair 时，sync 应能自行建立索引并完成首次同步。
+func TestEndToEndWithoutRepair(t *testing.T) {
+	_, a, b := setup(t)
 	writeFile(t, filepath.Join(a, "disk.vmdk"), rnd(300*1024, 31))
 	writeFile(t, filepath.Join(a, "vm.vmx"), []byte("a = 1\n"))
 
-	// 两端都不 init，直接 push/apply 应能完成首次全量投递
-	run(t, "push", a, c, "--site", "A", testLBArg, testSBArg)
-	run(t, "apply", b, c, "--site", "B")
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
 	assertTreesEqual(t, a, b)
 }
 
 func TestVerifyDetectsAndRepairFixes(t *testing.T) {
-	_, a, _, _ := setup(t)
+	_, a, _ := setup(t)
 	p := filepath.Join(a, "disk.vmdk")
 	orig := rnd(256*1024, 41)
 	writeFile(t, p, orig)
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
+	run(t, "repair", a, testLBArg, testSBArg)
 
 	if out := run(t, "verify", a); !strings.Contains(out, "校验通过") {
 		t.Fatalf("初始校验应通过:\n%s", out)
@@ -417,21 +262,20 @@ func TestVerifyDetectsAndRepairFixes(t *testing.T) {
 		t.Fatalf("应报告内容不符:\n%s", out)
 	}
 
-	run(t, "repair", a)
+	run(t, "repair", a, testLBArg, testSBArg)
 	if out := run(t, "verify", a); !strings.Contains(out, "校验通过") {
 		t.Fatalf("repair 后校验应通过:\n%s", out)
 	}
 }
 
 func TestEndToEndRandomRounds(t *testing.T) {
-	_, a, b, c := setup(t)
+	_, a, b := setup(t)
 	names := []string{"disk-s001.vmdk", "disk-s002.vmdk", "disk-s003.vmdk", "vm.vmx", "extra.cfg"}
 	for i, n := range names {
 		writeFile(t, filepath.Join(a, n), rnd(80000+i*61000, int64(100+i)))
 	}
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
-	copyTree(t, a, b)
-	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
+	assertTreesEqual(t, a, b)
 
 	rng := rand.New(rand.NewSource(2024))
 	for round := 0; round < 20; round++ {
@@ -469,19 +313,15 @@ func TestEndToEndRandomRounds(t *testing.T) {
 			writeFile(t, p, d)
 		}
 
-		run(t, "push", a, c, testLBArg, testSBArg)
-		run(t, "apply", b, c, "--verify")
+		run(t, "sync", a, b, "--yes", "--verify", testLBArg, testSBArg)
 		assertTreesEqual(t, a, b)
-		if siteFile(t, a).SetDigest != siteFile(t, b).SetDigest {
-			t.Fatalf("第 %d 轮后两端摘要不一致", round)
-		}
 	}
 }
 
 // 目录对排除列表：两侧同时生效，被排除的文件不复制、目标侧已有的同名文件不删除。
 func TestEndToEndPairExcludes(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
-	_, a, b, _ := setup(t)
+	_, a, b := setup(t)
 	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
 	writeFile(t, filepath.Join(a, "cache.tmp"), []byte("source-excluded"))
 	writeFile(t, filepath.Join(a, "sub", "cache.tmp"), []byte("source-excluded"))
@@ -511,14 +351,14 @@ func TestEndToEndPairExcludes(t *testing.T) {
 }
 
 func TestSyncRequiresTwoPaths(t *testing.T) {
-	_, a, b, _ := setup(t)
+	_, a, b := setup(t)
 	runExpectFail(t, "sync", "--yes")
 	runExpectFail(t, "sync", a, "--yes")
 	runExpectFail(t, "sync", a, b, filepath.Join(a, "extra"), "--yes")
 }
 
 func TestSyncReverseSwapsPaths(t *testing.T) {
-	_, a, b, _ := setup(t)
+	_, a, b := setup(t)
 	writeFile(t, filepath.Join(b, "from-b.txt"), []byte("b"))
 	run(t, "sync", a, b, "--reverse", "--yes")
 	if got, err := os.ReadFile(filepath.Join(a, "from-b.txt")); err != nil || string(got) != "b" {
@@ -526,14 +366,9 @@ func TestSyncReverseSwapsPaths(t *testing.T) {
 	}
 }
 
-func TestPushRejectsSinglePath(t *testing.T) {
-	_, a, _, _ := setup(t)
-	runExpectFail(t, "push", a, testLBArg, testSBArg)
-}
-
 func TestLegacyDirExcludesIgnored(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
-	_, a, b, _ := setup(t)
+	_, a, b := setup(t)
 	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
 	writeFile(t, filepath.Join(a, "legacy.txt"), []byte("legacy"))
 	writeFile(t, filepath.Join(a, ".blocksync", "config.json"), []byte(`{"excludes":["legacy.txt"]}`))
@@ -541,27 +376,5 @@ func TestLegacyDirExcludesIgnored(t *testing.T) {
 	run(t, "sync", a, b, testLBArg, testSBArg, "--yes")
 	if _, err := os.Stat(filepath.Join(b, "legacy.txt")); err != nil {
 		t.Fatal("旧的按目录排除文件应已停用，文件应被同步")
-	}
-}
-
-func TestPushUsesPairExcludes(t *testing.T) {
-	t.Setenv("LOCALAPPDATA", t.TempDir())
-	_, a, b, c := setup(t)
-	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
-	run(t, "init", a, "--site", "A", testLBArg, testSBArg)
-	copyTree(t, a, b)
-	run(t, "init", b, "--site", "B", testLBArg, testSBArg)
-
-	writeFile(t, filepath.Join(a, "secret.tmp"), []byte("secret"))
-	cfg := &state.Config{}
-	cfg.SetExcludes(a, c, []string{"*.tmp"})
-	if err := state.SaveConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	run(t, "push", a, c, testLBArg, testSBArg)
-	run(t, "apply", b, c)
-	if _, err := os.Stat(filepath.Join(b, "secret.tmp")); !os.IsNotExist(err) {
-		t.Fatal("目录对排除规则应对 push 生效")
 	}
 }

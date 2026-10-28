@@ -131,7 +131,7 @@ func Decode(b []byte) (*File, error) {
 	return f, nil
 }
 
-// ContentDigest 只对内容与块参数求摘要，不含 mtime，供跨站点状态比对使用。
+// ContentDigest 只对内容与块参数求摘要，不含 mtime，供写后校验与索引比对使用。
 func (f *File) ContentDigest() [HashLen]byte {
 	var head [16]byte
 	binary.LittleEndian.PutUint32(head[0:], f.LB)
@@ -158,31 +158,6 @@ func (f *File) EqualContent(g *File) bool {
 		return false
 	}
 	return f.ContentDigest() == g.ContentDigest()
-}
-
-// SetEntry 站点状态摘要中的一项。
-type SetEntry struct {
-	Path   string
-	Size   uint64
-	Digest [HashLen]byte
-}
-
-// SetDigest 对整组文件的 (路径, 大小, 内容摘要) 求摘要，与顺序和 mtime 无关。
-func SetDigest(entries []SetEntry) [HashLen]byte {
-	sorted := append([]SetEntry(nil), entries...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
-	h := sha256.New()
-	var num [16]byte
-	for _, e := range sorted {
-		h.Write([]byte(e.Path))
-		h.Write([]byte{0})
-		binary.LittleEndian.PutUint64(num[0:], e.Size)
-		h.Write(num[:8])
-		h.Write(e.Digest[:])
-	}
-	var out [HashLen]byte
-	copy(out[:], h.Sum(nil))
-	return out
 }
 
 // Store 负责 idx 目录下按相对路径镜像存放的索引文件。
@@ -224,19 +199,6 @@ func (s *Store) Save(rel string, f *File) error {
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, f.Encode(), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
-}
-
-// SaveRaw 直接写入已编码的索引数据。
-func (s *Store) SaveRaw(rel string, blob []byte) error {
-	p := s.target(rel)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, blob, 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, p)

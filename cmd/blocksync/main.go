@@ -1,4 +1,4 @@
-// blocksync 命令行入口：init/push/apply/status/verify/repair 六个子命令。
+// blocksync 命令行入口：sync/setup/status/verify/repair 五个子命令。
 package main
 
 import (
@@ -6,18 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
-	"time"
 
-	"blocksync/internal/apply"
 	"blocksync/internal/index"
 	"blocksync/internal/mirror"
-	"blocksync/internal/patch"
 	"blocksync/internal/scan"
 	"blocksync/internal/state"
 )
@@ -57,9 +52,6 @@ const usageText = `blocksync —— 大目录/大文件的块级增量同步
 源目录保护: 输入目录与输出目录相同、或互相包含时直接拒绝；每次写入与删除
 都会复核路径，确保不落在输入目录内。首次同步或需要删除文件时，会先列出计划
 并要求确认。
-
-进阶（两个目录无法同时访问时分两步走）:
-  blocksync init / push / apply，详见 README
 `
 
 func main() {
@@ -70,14 +62,8 @@ func main() {
 	cmd := os.Args[1]
 	var err error
 	switch cmd {
-	case "init":
-		err = cmdRebuild(os.Args[2:], "init")
 	case "repair":
-		err = cmdRebuild(os.Args[2:], "repair")
-	case "push":
-		err = cmdPush(os.Args[2:])
-	case "apply":
-		err = cmdApply(os.Args[2:])
+		err = cmdRepair(os.Args[2:])
 	case "status":
 		err = cmdStatus(os.Args[2:])
 	case "sync":
@@ -107,7 +93,7 @@ func workersOrDefault(n int) int {
 	return runtime.NumCPU()
 }
 
-// reorder 把选项挪到位置参数之前，使 `blocksync push 目录 载波 --dry-run` 这种写法可用。
+// reorder 把选项挪到位置参数之前，使 `blocksync sync A B --dry-run` 这种写法可用。
 func reorder(args []string, takesValue map[string]bool) []string {
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
@@ -215,21 +201,6 @@ func askDir(prompt, def string, create bool) (string, error) {
 	}
 }
 
-// autoDetectCarrier 在各盘符下查找已存在的 blocksync 目录，用于移动硬盘盘符变化时自动纠正。
-func autoDetectCarrier() (string, bool) {
-	var found []string
-	for c := 'D'; c <= 'Z'; c++ {
-		root := string(c) + `:\`
-		if st, err := os.Stat(filepath.Join(root, "blocksync")); err == nil && st.IsDir() {
-			found = append(found, root)
-		}
-	}
-	if len(found) == 1 {
-		return found[0], true
-	}
-	return "", false
-}
-
 // runSetup 交互录入并保存本机配置，返回最终配置。
 func runSetup() (*state.Config, error) {
 	cur, err := state.LoadConfig()
@@ -268,48 +239,12 @@ func runSetup() (*state.Config, error) {
 		fmt.Println()
 		if askYes("该目录还没有索引，现在建立吗（只读扫描一遍，几分钟）", true) {
 			fmt.Println()
-			if err := cmdRebuild([]string{cfg.LocalDir, "--site", cfg.SiteID}, "init"); err != nil {
+			if err := cmdRepair([]string{cfg.LocalDir}); err != nil {
 				return cfg, err
 			}
 		}
 	}
 	return cfg, nil
-}
-
-// resolveTargets 优先使用命令行给出的两个目录，否则读取本机配置，配置缺失时现场录入。
-func resolveTargets(fs *flag.FlagSet, siteName *string) (local, carrier string, err error) {
-	args := fs.Args()
-	if len(args) == 1 || len(args) > 2 {
-		return "", "", errors.New("需要两个目录，或省略两个目录使用本机配置")
-	}
-	if len(args) == 2 {
-		local = filepath.Clean(args[0])
-		carrier = filepath.Clean(args[1])
-		return local, carrier, nil
-	}
-
-	cfg, err := state.LoadConfig()
-	if err != nil {
-		return "", "", err
-	}
-	if cfg == nil || cfg.LocalDir == "" || cfg.CarrierDir == "" {
-		if cfg, err = runSetup(); err != nil {
-			return "", "", err
-		}
-	}
-	if *siteName == "" {
-		*siteName = cfg.SiteID
-	}
-	carrier = cfg.CarrierDir
-	if st, err := os.Stat(carrier); err != nil || !st.IsDir() {
-		if alt, ok := autoDetectCarrier(); ok {
-			fmt.Printf("提示：配置的载波目录 %s 不可用，已自动改用 %s\n", carrier, alt)
-			carrier = alt
-			cfg.CarrierDir = alt
-			_ = state.SaveConfig(cfg)
-		}
-	}
-	return cfg.LocalDir, carrier, nil
 }
 
 // loadExcludes 汇总排除规则：内置默认 → 目录对的界面配置。
@@ -347,16 +282,16 @@ func fmtSize(n uint64) string {
 	return fmt.Sprintf("%.1f %s", v, units[i])
 }
 
-// ---------- init / repair ----------
+// ---------- repair ----------
 
-func cmdRebuild(args []string, mode string) error {
-	fs := flag.NewFlagSet(mode, flag.ContinueOnError)
+// cmdRepair 按磁盘实际内容重建块索引，并清理已不存在文件的残留索引。
+func cmdRepair(args []string) error {
+	fs := flag.NewFlagSet("repair", flag.ContinueOnError)
 	workers := fs.Int("workers", 0, "")
 	lb := fs.Int64("lb", index.DefaultLBSize, "")
 	sb := fs.Int64("sb", index.DefaultSBSize, "")
 	force := fs.Bool("force", false, "")
-	siteName := fs.String("site", "", "")
-	if err := parseFlags(fs, args, "workers", "lb", "sb", "site"); err != nil {
+	if err := parseFlags(fs, args, "workers", "lb", "sb"); err != nil {
 		return err
 	}
 	local := ""
@@ -373,9 +308,6 @@ func cmdRebuild(args []string, mode string) error {
 			}
 		}
 		local = cfg.LocalDir
-		if *siteName == "" {
-			*siteName = cfg.SiteID
-		}
 	}
 	if !scan.ValidateBlocks(*lb, *sb) {
 		return fmt.Errorf("块大小非法：粗块 %d 必须大于细块 %d 且能被其整除", *lb, *sb)
@@ -394,16 +326,6 @@ func cmdRebuild(args []string, mode string) error {
 	}
 	defer unlock()
 
-	site, err := state.Load(local)
-	if err != nil {
-		return err
-	}
-	if *siteName != "" && site.SiteID != *siteName {
-		site.SiteID = *siteName
-		if err := state.Save(local, site); err != nil {
-			return err
-		}
-	}
 	store := index.NewStore(state.Dir(local))
 	excludes := loadExcludes(local, "")
 	files, err := scan.Walk(local, excludes)
@@ -412,7 +334,6 @@ func cmdRebuild(args []string, mode string) error {
 	}
 	w := workersOrDefault(*workers)
 
-	var entries []index.SetEntry
 	var total uint64
 	for i, f := range files {
 		abs := filepath.Join(local, filepath.FromSlash(f.Rel))
@@ -424,7 +345,6 @@ func cmdRebuild(args []string, mode string) error {
 		if err := store.Save(f.Rel, res.New); err != nil {
 			return err
 		}
-		entries = append(entries, index.SetEntry{Path: f.Rel, Size: res.New.Size, Digest: res.New.ContentDigest()})
 		total += res.New.Size
 	}
 	// 清理磁盘上已不存在的旧索引
@@ -439,476 +359,8 @@ func cmdRebuild(args []string, mode string) error {
 		}
 	}
 
-	site.Generation++
-	site.SetDigest = state.DigestHex(index.SetDigest(entries))
-	if err := state.Save(local, site); err != nil {
-		return err
-	}
 	fmt.Printf("完成：%d 个文件，共 %s\n", len(files), fmtSize(total))
-	fmt.Printf("站点 %s，代次 %d，状态摘要 %s\n", site.SiteID, site.Generation, short(site.SetDigest))
-	fmt.Println("请在对端站点也执行一次 init（内容一致时两侧摘要必然相同）")
 	return nil
-}
-
-func short(s string) string {
-	if len(s) > 16 {
-		return s[:16]
-	}
-	return s
-}
-
-// ---------- push ----------
-
-type pendingFile struct {
-	rel     string
-	action  patch.Action
-	spec    patch.EntrySpec
-	idx     *index.File
-	changed uint64
-}
-
-func cmdPush(args []string) error {
-	fs := flag.NewFlagSet("push", flag.ContinueOnError)
-	dry := fs.Bool("dry-run", false, "")
-	full := fs.Bool("full", false, "")
-	force := fs.Bool("force", false, "")
-	workers := fs.Int("workers", 0, "")
-	lb := fs.Int64("lb", index.DefaultLBSize, "")
-	sb := fs.Int64("sb", index.DefaultSBSize, "")
-	siteName := fs.String("site", "", "")
-	if err := parseFlags(fs, args, "workers", "lb", "sb", "site"); err != nil {
-		return err
-	}
-	local, carrier, err := resolveTargets(fs, siteName)
-	if err != nil {
-		return err
-	}
-	if !scan.ValidateBlocks(*lb, *sb) {
-		return fmt.Errorf("块大小非法：粗块 %d 必须大于细块 %d 且能被其整除", *lb, *sb)
-	}
-	if st, err := os.Stat(local); err != nil || !st.IsDir() {
-		return fmt.Errorf("本地目录不存在: %s", local)
-	}
-	if st, err := os.Stat(carrier); err != nil || !st.IsDir() {
-		return fmt.Errorf("载波目录不存在: %s", carrier)
-	}
-	warnLegacyExcludes(local)
-	unlock, err := state.Lock(local, *force)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	site, err := state.Load(local)
-	if err != nil {
-		return err
-	}
-	if *siteName != "" && site.SiteID != *siteName {
-		site.SiteID = *siteName
-		if err := state.Save(local, site); err != nil {
-			return err
-		}
-	}
-	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludes(local, carrier)
-	files, err := scan.Walk(local, excludes)
-	if err != nil {
-		return fmt.Errorf("扫描目录失败: %w", err)
-	}
-	w := workersOrDefault(*workers)
-
-	var (
-		setEntries []index.SetEntry
-		pending    []pendingFile
-		newIdx     = map[string]*index.File{}
-		totalBytes uint64
-		scanned    int
-	)
-	for i, f := range files {
-		abs := filepath.Join(local, filepath.FromSlash(f.Rel))
-		old, err := store.Load(f.Rel)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "警告: %s 索引损坏，将重建（%v）\n", f.Rel, err)
-			old = nil
-		}
-		if old != nil && !*full && old.Size == uint64(f.Size) && old.MtimeNano == f.MtimeNano {
-			setEntries = append(setEntries, index.SetEntry{Path: f.Rel, Size: old.Size, Digest: old.ContentDigest()})
-			continue
-		}
-
-		scanned++
-		fmt.Fprintf(os.Stderr, "[%d/%d] 比对 %s (%s)\n", i+1, len(files), f.Rel, fmtSize(uint64(f.Size)))
-		action := patch.ActionModify
-		var res *scan.Result
-		if old == nil {
-			action = patch.ActionAdd
-			res, err = scan.ScanFull(abs, *lb, *sb, w)
-		} else {
-			res, err = scan.ScanDiff(abs, *lb, *sb, old, w)
-		}
-		if err != nil {
-			return fmt.Errorf("扫描 %s 失败: %w", f.Rel, err)
-		}
-		newIdx[f.Rel] = res.New
-		setEntries = append(setEntries, index.SetEntry{Path: f.Rel, Size: res.New.Size, Digest: res.New.ContentDigest()})
-
-		if len(res.Ranges) > 0 {
-			rs := make([]patch.Range, len(res.Ranges))
-			for k, r := range res.Ranges {
-				rs[k] = patch.Range{Off: r.Off, Len: r.Len}
-			}
-			pending = append(pending, pendingFile{
-				rel:    f.Rel,
-				action: action,
-				spec: patch.EntrySpec{
-					Path: f.Rel, Action: action,
-					NewSize:   res.New.Size,
-					MtimeNano: res.New.MtimeNano,
-					LB:        res.New.LB, SB: res.New.SB,
-					Ranges: rs,
-				},
-				idx:     res.New,
-				changed: res.ChangedBytes,
-			})
-			totalBytes += res.ChangedBytes
-		}
-	}
-
-	// 磁盘上已删除的文件
-	seen := map[string]bool{}
-	for _, f := range files {
-		seen[f.Rel] = true
-	}
-	idxList, _ := store.List()
-	for _, rel := range idxList {
-		if seen[rel] || scan.Excluded(rel, excludes) {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(local, filepath.FromSlash(rel))); errors.Is(err, os.ErrNotExist) {
-			pending = append(pending, pendingFile{
-				rel:    rel,
-				action: patch.ActionDelete,
-				spec:   patch.EntrySpec{Path: rel, Action: patch.ActionDelete},
-			})
-		}
-	}
-	sort.Slice(pending, func(i, j int) bool { return pending[i].rel < pending[j].rel })
-
-	if len(pending) == 0 {
-		fmt.Printf("无需搬运：%d 个文件均未变化（比对扫描 %d 个）\n", len(files), scanned)
-		return nil
-	}
-
-	fmt.Printf("待搬运：%d 个文件，%s\n", len(pending), fmtSize(totalBytes))
-	for _, p := range pending {
-		if p.action == patch.ActionDelete {
-			fmt.Printf("  %-8s %s\n", p.action, p.rel)
-			continue
-		}
-		fmt.Printf("  %-8s %s  变化块 %s（文件共 %s）\n", p.action, p.rel, fmtSize(p.changed), fmtSize(p.idx.Size))
-	}
-	if *dry {
-		fmt.Println("--dry-run：未写入任何文件")
-		return nil
-	}
-
-	gen := site.Generation + 1
-	newDigest := index.SetDigest(setEntries)
-	patchDir := filepath.Join(carrier, "blocksync", site.SiteID)
-	if err := os.MkdirAll(patchDir, 0o755); err != nil {
-		return err
-	}
-	name := fmt.Sprintf("%s-g%04d%s", time.Now().Format("20060102-150405"), gen, patch.Ext)
-	final := filepath.Join(patchDir, name)
-	tmp := final + ".tmp"
-	parentDigest, err := state.DigestBytes(site.SetDigest)
-	if err != nil {
-		return err
-	}
-	pw, err := patch.Create(tmp, final, gen, parentDigest, newDigest)
-	if err != nil {
-		return err
-	}
-
-	for _, p := range pending {
-		if p.action == patch.ActionDelete {
-			ew, err := pw.BeginEntry(&p.spec)
-			if err != nil {
-				pw.Abort()
-				return err
-			}
-			if err := ew.End(nil); err != nil {
-				pw.Abort()
-				return err
-			}
-			continue
-		}
-		abs := filepath.Join(local, filepath.FromSlash(p.rel))
-		sf, err := os.Open(abs)
-		if err != nil {
-			pw.Abort()
-			return err
-		}
-		ew, err := pw.BeginEntry(&p.spec)
-		if err != nil {
-			sf.Close()
-			pw.Abort()
-			return err
-		}
-		n, err := io.Copy(ew, patch.NewRangeReader(sf, p.spec.Ranges))
-		if err == nil && uint64(n) != p.spec.PayloadLen() {
-			err = fmt.Errorf("读取源数据不足：%d / %d", n, p.spec.PayloadLen())
-		}
-		if err == nil {
-			err = ew.End(p.idx.Encode())
-		}
-		sf.Close()
-		if err != nil {
-			pw.Abort()
-			return fmt.Errorf("生成 %s 的补丁失败: %w", p.rel, err)
-		}
-	}
-	if err := pw.Close(); err != nil {
-		return err
-	}
-
-	for rel, f := range newIdx {
-		if err := store.Save(rel, f); err != nil {
-			return err
-		}
-	}
-	for _, p := range pending {
-		if p.action == patch.ActionDelete {
-			_ = store.Delete(p.rel)
-		}
-	}
-	site.Generation = gen
-	site.SetDigest = state.DigestHex(newDigest)
-	site.LastPushed = name
-	if err := state.Save(local, site); err != nil {
-		return err
-	}
-
-	st, _ := os.Stat(final)
-	var sz int64
-	if st != nil {
-		sz = st.Size()
-	}
-	fmt.Printf("已写入补丁 %s（%s，共 %d 个文件条目）\n", name, fmtSize(uint64(sz)), pw.FileCount())
-	return nil
-}
-
-// ---------- apply ----------
-
-func siteDirs(carrier string) ([]string, error) {
-	root := filepath.Join(carrier, "blocksync")
-	ents, err := os.ReadDir(root)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, e := range ents {
-		if e.IsDir() {
-			out = append(out, filepath.Join(root, e.Name()))
-		}
-	}
-	return out, nil
-}
-
-func findChain(infos []patch.Info, cur [32]byte) []patch.Info {
-	used := make([]bool, len(infos))
-	var chain []patch.Info
-	for {
-		found := -1
-		for i, in := range infos {
-			if used[i] {
-				continue
-			}
-			if in.Header.Parent == cur {
-				found = i
-				break
-			}
-		}
-		if found < 0 {
-			return chain
-		}
-		used[found] = true
-		chain = append(chain, infos[found])
-		cur = infos[found].Header.Result
-	}
-}
-
-func cmdApply(args []string) error {
-	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
-	dry := fs.Bool("dry-run", false, "")
-	verify := fs.Bool("verify", false, "")
-	force := fs.Bool("force", false, "")
-	keep := fs.Int("keep", 2, "应用后每个对端保留的补丁个数")
-	siteName := fs.String("site", "", "")
-	if err := parseFlags(fs, args, "keep", "site"); err != nil {
-		return err
-	}
-	local, carrier, err := resolveTargets(fs, siteName)
-	if err != nil {
-		return err
-	}
-	if st, err := os.Stat(local); err != nil || !st.IsDir() {
-		return fmt.Errorf("本地目录不存在: %s", local)
-	}
-	if st, err := os.Stat(carrier); err != nil || !st.IsDir() {
-		return fmt.Errorf("载波目录不存在: %s", carrier)
-	}
-	unlock, err := state.Lock(local, *force)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	site, err := state.Load(local)
-	if err != nil {
-		return err
-	}
-	if *siteName != "" {
-		site.SiteID = *siteName
-	}
-	store := index.NewStore(state.Dir(local))
-	cur, err := state.DigestBytes(site.SetDigest)
-	if err != nil {
-		return err
-	}
-
-	dirs, err := siteDirs(carrier)
-	if err != nil {
-		return err
-	}
-	var infos []patch.Info
-	for _, d := range dirs {
-		if filepath.Base(d) == site.SiteID {
-			continue
-		}
-		l, err := patch.List(d)
-		if err != nil {
-			return err
-		}
-		infos = append(infos, l...)
-	}
-	if len(infos) == 0 {
-		fmt.Println("载波上没有待应用的补丁")
-		return nil
-	}
-	chain := findChain(infos, cur)
-	if len(chain) == 0 {
-		fmt.Println("载波上的补丁与本机状态不衔接：")
-		for _, in := range infos {
-			fmt.Printf("  %s  代次 %d  基线 %s\n", in.Name, in.Header.Generation, short(state.DigestHex(in.Header.Parent)))
-		}
-		return fmt.Errorf("本机状态摘要为 %s。常见原因：上一次离开时漏了 push，或两端各自改过文件造成分叉", short(state.DigestHex(cur)))
-	}
-
-	if *dry {
-		var total int64
-		var nfiles int
-		for _, in := range chain {
-			r, err := patch.Open(in.Path)
-			if err != nil {
-				return err
-			}
-			var b int64
-			var n int
-			_ = r.Walk(func(e *patch.EntryHeader, _ io.ReaderAt) error {
-				b += e.PayloadLen
-				n++
-				return nil
-			})
-			r.Close()
-			fmt.Printf("  %s  代次 %d  %d 个文件  %s\n", in.Name, in.Header.Generation, n, fmtSize(uint64(b)))
-			total += b
-			nfiles += n
-		}
-		fmt.Printf("将应用 %d 个补丁、%d 个文件条目，共写入 %s（--dry-run 未改动任何文件）\n",
-			len(chain), nfiles, fmtSize(uint64(total)))
-		return nil
-	}
-
-	for _, in := range chain {
-		r, err := patch.Open(in.Path)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "校验并应用 %s ...\n", in.Name)
-		if err := r.Verify(); err != nil {
-			r.Close()
-			return fmt.Errorf("%s: %w", in.Name, err)
-		}
-		var written int64
-		var nfiles int
-		err = r.Walk(func(e *patch.EntryHeader, payload io.ReaderAt) error {
-			n, err := apply.Entry(local, store, e, payload)
-			if err != nil {
-				return fmt.Errorf("%s: %w", e.Path, err)
-			}
-			written += n
-			nfiles++
-			if *verify && len(e.Index) > 0 && e.Action != patch.ActionDelete {
-				if err := verifyAgainstIndex(local, e); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			r.Close()
-			return err
-		}
-		site.Generation = r.Header.Generation
-		site.SetDigest = state.DigestHex(r.Header.Result)
-		site.LastApplied = in.Name
-		r.Close()
-		if err := state.Save(local, site); err != nil {
-			return err
-		}
-		fmt.Printf("已应用 %s：%d 个文件，写入 %s\n", in.Name, nfiles, fmtSize(uint64(written)))
-	}
-
-	if *keep >= 0 {
-		prune(carrier, site.SiteID, *keep, dirs)
-	}
-	fmt.Printf("完成：站点 %s 代次 %d，状态摘要 %s\n", site.SiteID, site.Generation, short(site.SetDigest))
-	return nil
-}
-
-func verifyAgainstIndex(local string, e *patch.EntryHeader) error {
-	f, err := index.Decode(e.Index)
-	if err != nil {
-		return fmt.Errorf("校验 %s: 补丁内索引损坏: %w", e.Path, err)
-	}
-	abs := filepath.Join(local, filepath.FromSlash(e.Path))
-	res, err := scan.ScanFull(abs, int64(f.LB), int64(f.SB), runtime.NumCPU())
-	if err != nil {
-		return fmt.Errorf("校验 %s 失败: %w", e.Path, err)
-	}
-	if !res.New.EqualContent(f) {
-		return fmt.Errorf("校验失败：%s 应用后内容与补丁声明不一致", e.Path)
-	}
-	return nil
-}
-
-func prune(carrier, ownSite string, keep int, dirs []string) {
-	for _, d := range dirs {
-		if filepath.Base(d) == ownSite {
-			continue
-		}
-		list, err := patch.List(d)
-		if err != nil || len(list) <= keep {
-			continue
-		}
-		for _, in := range list[:len(list)-keep] {
-			_ = os.Remove(in.Path)
-		}
-	}
 }
 
 // ---------- sync ----------
@@ -1063,7 +515,6 @@ func cmdSetup(args []string) error {
 		fmt.Printf("配置文件  : %s\n", p)
 		fmt.Printf("源目录    : %s\n", cfg.LocalDir)
 		fmt.Printf("目标目录  : %s\n", cfg.CarrierDir)
-		fmt.Printf("站点名    : %s\n", cfg.SiteID)
 		return nil
 	}
 	_, err := runSetup()
@@ -1072,38 +523,27 @@ func cmdSetup(args []string) error {
 
 // ---------- status ----------
 
+// cmdStatus 输出目录的索引覆盖情况，供确认索引是否完整。
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	siteName := fs.String("site", "", "")
-	if err := parseFlags(fs, args, "site"); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	local, carrierArg := "", ""
+	local := ""
 	if fs.NArg() >= 1 {
 		local = filepath.Clean(fs.Arg(0))
-	}
-	if fs.NArg() >= 2 {
-		carrierArg = filepath.Clean(fs.Arg(1))
-	}
-	if local == "" {
+	} else {
 		cfg, err := state.LoadConfig()
 		if err != nil {
 			return err
 		}
 		if cfg == nil || cfg.LocalDir == "" {
-			return errors.New("本机尚未配置，请先运行 blocksync setup")
+			return errors.New("本机尚未配置，请直接运行 blocksync setup")
 		}
 		local = cfg.LocalDir
-		if carrierArg == "" {
-			carrierArg = cfg.CarrierDir
-		}
 	}
-	site, err := state.Load(local)
-	if err != nil {
-		return err
-	}
-	if *siteName != "" {
-		site.SiteID = *siteName
+	if st, err := os.Stat(local); err != nil || !st.IsDir() {
+		return fmt.Errorf("目录不存在: %s", local)
 	}
 	store := index.NewStore(state.Dir(local))
 	list, _ := store.List()
@@ -1113,56 +553,9 @@ func cmdStatus(args []string) error {
 			indexed += f.Size
 		}
 	}
-	fmt.Printf("站点      : %s\n", site.SiteID)
-	fmt.Printf("代次      : %d\n", site.Generation)
-	fmt.Printf("状态摘要  : %s\n", orDash(site.SetDigest))
+	fmt.Printf("目录      : %s\n", local)
 	fmt.Printf("索引文件  : %d 个，覆盖 %s\n", len(list), fmtSize(indexed))
-	if site.LastPushed != "" {
-		fmt.Printf("最近推送  : %s\n", site.LastPushed)
-	}
-	if site.LastApplied != "" {
-		fmt.Printf("最近应用  : %s\n", site.LastApplied)
-	}
-	if carrierArg == "" {
-		return nil
-	}
-	carrier := carrierArg
-	dirs, err := siteDirs(carrier)
-	if err != nil {
-		return err
-	}
-	cur, _ := state.DigestBytes(site.SetDigest)
-	var total int64
-	var infos []patch.Info
-	for _, d := range dirs {
-		if filepath.Base(d) == site.SiteID {
-			continue
-		}
-		l, _ := patch.List(d)
-		infos = append(infos, l...)
-		for _, in := range l {
-			if st, err := os.Stat(in.Path); err == nil {
-				total += st.Size()
-			}
-		}
-	}
-	fmt.Printf("载波补丁  : %d 个，共 %s\n", len(infos), fmtSize(uint64(total)))
-	chain := findChain(infos, cur)
-	if len(chain) > 0 {
-		fmt.Printf("可直接应用: %d 个（最新代次 %d）\n", len(chain), chain[len(chain)-1].Header.Generation)
-	} else if len(infos) > 0 {
-		fmt.Println("可直接应用: 0（补丁与本机基线不衔接，可能漏推或已分叉）")
-	} else {
-		fmt.Println("可直接应用: 0（没有对端补丁）")
-	}
 	return nil
-}
-
-func orDash(s string) string {
-	if s == "" {
-		return "(未初始化)"
-	}
-	return s
 }
 
 // ---------- verify ----------

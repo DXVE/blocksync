@@ -61,18 +61,6 @@ func TestContentDigestIgnoresMtime(t *testing.T) {
 	}
 }
 
-func TestSetDigestOrderIndependent(t *testing.T) {
-	e1 := []SetEntry{{Path: "b", Size: 2, Digest: [32]byte{2}}, {Path: "a", Size: 1, Digest: [32]byte{1}}}
-	e2 := []SetEntry{{Path: "a", Size: 1, Digest: [32]byte{1}}, {Path: "b", Size: 2, Digest: [32]byte{2}}}
-	if SetDigest(e1) != SetDigest(e2) {
-		t.Fatal("集合摘要不应依赖输入顺序")
-	}
-	e3 := []SetEntry{{Path: "a", Size: 1, Digest: [32]byte{1}}}
-	if SetDigest(e1) == SetDigest(e3) {
-		t.Fatal("集合成员不同时摘要应不同")
-	}
-}
-
 func TestStoreSaveLoadDelete(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir)

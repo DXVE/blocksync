@@ -196,7 +196,7 @@ func TestExcluded(t *testing.T) {
 		"vmware.log":           false,
 		"vm.vmem":              false,
 		"nested/vm.vswp":       false,
-		".blocksync/site.json": true,
+		".blocksync/idx/a.idx": true,
 		".blocksync":           true,
 		"sub/.blocksync/x":     true,
 		"desktop.ini":          true,

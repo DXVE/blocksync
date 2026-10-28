@@ -10,7 +10,6 @@
 
 # blocksync 运行期状态与中间文件
 .blocksync/
-*.blkpatch
 *.idx
 *.lck
 *.tmp
