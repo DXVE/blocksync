@@ -337,8 +337,8 @@ var (
 	proc       *exec.Cmd
 	logChars   int
 
-	lastSrc, lastDst                         string
-	lastDry, lastVerify, lastFull, lastForce bool
+	lastSrc, lastDst                                   string
+	lastDry, lastVerify, lastFull, lastForce, lastMass bool
 
 	reProgress = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
 	reResult   = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
@@ -491,6 +491,16 @@ func ensureExe() (string, func(), error) {
 	return p, cleanup, nil
 }
 
+// massDeleteHint 返回失败日志中的超量删除提示行；没有则返回空串。
+func massDeleteHint(logText string) string {
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, "超过安全上限") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
+
 // ---------- 目录选择 ----------
 
 // browseFolder 以主窗口为 owner 选择目录。
@@ -583,7 +593,7 @@ func lockExists(dir string) bool {
 	return err == nil
 }
 
-func startRun(dry, verify, full, force bool) {
+func startRun(dry, verify, full, force, allowMass bool) {
 	src := strings.TrimSpace(getText(hEditSrc))
 	dst := strings.TrimSpace(getText(hEditDst))
 	if src == "" || dst == "" {
@@ -613,8 +623,11 @@ func startRun(dry, verify, full, force bool) {
 	if force {
 		args = append(args, "--force")
 	}
+	if allowMass {
+		args = append(args, "--allow-mass-delete")
+	}
 	lastSrc, lastDst = src, dst
-	lastDry, lastVerify, lastFull, lastForce = dry, verify, full, force
+	lastDry, lastVerify, lastFull, lastForce, lastMass = dry, verify, full, force, allowMass
 
 	mu.Lock()
 	progCur, progTotal, progKnown = 0, 0, false
@@ -1686,6 +1699,15 @@ func flushUI() {
 				setText(hStatus, "完成")
 			}
 		} else {
+			if hint := massDeleteHint(joined); hint != "" && !lastMass {
+				body := "本次要删除的文件数超过安全上限，同步已中止，未写入任何文件。\r\n\r\n" +
+					hint + "\r\n\r\n" +
+					"请先确认输入、输出目录没有填反。确认后将继续执行删除，继续吗？"
+				if msgBox(body, mbYesNo|mbIconWarning) == idYes {
+					startRun(lastDry, lastVerify, lastFull, lastForce, true)
+					return
+				}
+			}
 			if !lastDry && !lastForce && (lockExists(lastSrc) || lockExists(lastDst)) {
 				var body strings.Builder
 				body.WriteString("同步失败，且目录锁仍然存在：\r\n\r\n")
@@ -1697,7 +1719,7 @@ func flushUI() {
 				}
 				body.WriteString("\r\n可能是上次异常退出遗留，也可能另一个同步正在运行。\r\n强制忽略锁并重试一次吗？")
 				if msgBox(body.String(), mbYesNo|mbIconWarning) == idYes {
-					startRun(lastDry, lastVerify, lastFull, true)
+					startRun(lastDry, lastVerify, lastFull, true, lastMass)
 					return
 				}
 			}
@@ -1808,7 +1830,7 @@ func wndProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
 			f, _, _ := pSendMessageW.Call(uintptr(hChkFull), bmGetCheck, 0, 0)
 			verify := v != 0
 			full := f != 0
-			startRun(wParam&0xFFFF == idDry, verify, full, false)
+			startRun(wParam&0xFFFF == idDry, verify, full, false, false)
 		case idCancel:
 			if running && proc != nil && proc.Process != nil {
 				if msgBox("正在同步，确定要中止吗？\r\n\r\n已写入的部分不会回滚，重新运行会接着补齐。",
