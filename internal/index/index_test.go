@@ -86,3 +86,11 @@ func TestStoreSaveLoadDelete(t *testing.T) {
 		t.Fatal("删除后仍能读到索引")
 	}
 }
+
+// 旧版格式（BLKIDX1、含 FileDigest）应被拒绝，交由调用方重扫重建。
+func TestDecodeRejectsOldFormat(t *testing.T) {
+	old := append([]byte("BLKIDX1\x00"), make([]byte, 120)...)
+	if _, err := Decode(old); err == nil {
+		t.Fatal("旧版索引应被拒绝")
+	}
+}

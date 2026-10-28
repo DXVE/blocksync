@@ -17,20 +17,19 @@ const (
 	DefaultSBSize = 32 << 10 // 32 KiB 细块
 	HashLen       = 32
 
-	indexMagic   = "BLKIDX1\x00"
-	indexVersion = uint32(1)
+	indexMagic   = "BLKIDX2\x00"
+	indexVersion = uint32(2)
 	indexExt     = ".idx"
 )
 
 // File 单个文件的块索引。
 type File struct {
-	LB         uint32
-	SB         uint32
-	Size       uint64
-	MtimeNano  int64
-	FileDigest [HashLen]byte // 全文件 SHA256，0 表示未计算
-	LBHashes   []byte        // nLB * HashLen
-	SBHashes   []byte        // nSB * HashLen
+	LB        uint32
+	SB        uint32
+	Size      uint64
+	MtimeNano int64
+	LBHashes  []byte // nLB * HashLen
+	SBHashes  []byte // nSB * HashLen
 }
 
 // BlockCount 返回按 bs 切分 size 得到的块数。
@@ -72,7 +71,6 @@ func (f *File) Encode() []byte {
 	b = binary.LittleEndian.AppendUint32(b, HashLen)
 	b = binary.LittleEndian.AppendUint64(b, f.Size)
 	b = binary.LittleEndian.AppendUint64(b, uint64(f.MtimeNano))
-	b = append(b, f.FileDigest[:]...)
 	b = binary.LittleEndian.AppendUint64(b, uint64(f.NLB()))
 	b = binary.LittleEndian.AppendUint64(b, uint64(f.NSB()))
 	b = append(b, f.LBHashes...)
@@ -82,7 +80,7 @@ func (f *File) Encode() []byte {
 
 // Decode 反序列化并校验块数与长度一致。
 func Decode(b []byte) (*File, error) {
-	const fixed = 8 + 4 + 4 + 4 + 4 + 8 + 8 + HashLen + 8 + 8
+	const fixed = 8 + 4 + 4 + 4 + 4 + 8 + 8 + 8 + 8
 	if len(b) < fixed {
 		return nil, errors.New("索引数据过短")
 	}
@@ -109,8 +107,6 @@ func Decode(b []byte) (*File, error) {
 	pos += 8
 	f.MtimeNano = int64(binary.LittleEndian.Uint64(b[pos:]))
 	pos += 8
-	copy(f.FileDigest[:], b[pos:pos+HashLen])
-	pos += HashLen
 	nLB := int64(binary.LittleEndian.Uint64(b[pos:]))
 	pos += 8
 	nSB := int64(binary.LittleEndian.Uint64(b[pos:]))
