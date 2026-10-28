@@ -5,5 +5,5 @@ package main
 
 import _ "embed"
 
-//go:embed embedded/blocksync.exe
+//go:embed embedded/BlockSync-CLI.exe
 var embeddedCLI []byte

@@ -1,6 +1,6 @@
 //go:build windows
 
-// blocksync 图形界面：只收集路径与选项，调用同目录的 blocksync.exe 执行，并把输出回显到窗口。
+// BlockSync-GUI：只收集路径与选项，调用内置的 BlockSync-CLI 执行，并把输出回显到窗口。
 package main
 
 import (
@@ -379,7 +379,7 @@ var excludeSample = []string{
 	`.DS_Store`,
 }
 
-// confirmMarker 与命令行 blocksync.exe 中的同名常量保持一致：出现该行时子进程在等待确认。
+// confirmMarker 与 BlockSync-CLI 中的同名常量保持一致：出现该行时子进程在等待确认。
 const confirmMarker = "需要确认后才会开始写入"
 
 // seedExcludes 为尚无排除记录的目录对写入示例规则作为默认值；

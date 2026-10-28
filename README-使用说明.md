@@ -20,7 +20,7 @@
 ## 一、快速开始（无需配置）
 
 ```bat
-dist\blocksync.exe sync "D:\data\project" "E:\backup\project"
+dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project"
 ```
 
 将 `D:\data\project` 同步到 `E:\backup\project`。首次执行会完整复制，并在两侧目录下各生成一份索引（保存在各自的 `.blocksync` 子目录中）；此后每次仅传输变化的块。
@@ -28,13 +28,13 @@ dist\blocksync.exe sync "D:\data\project" "E:\backup\project"
 反向同步时交换两个参数的顺序：
 
 ```bat
-dist\blocksync.exe sync "E:\backup\project" "D:\data\project"
+dist\BlockSync-CLI.exe sync "E:\backup\project" "D:\data\project"
 ```
 
 仅做比对、不写任何数据文件（测试比对）：
 
 ```bat
-dist\blocksync.exe sync "D:\data\project" "E:\backup\project" --dry-run
+dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project" --dry-run
 ```
 
 测试比对只做读取与比对，不写数据文件、不更新索引；随后的正式同步会按当时的状态重新计算差异。日志逐文件给出状态与变化量：
@@ -153,8 +153,8 @@ blocksync repair [<目录>]      按磁盘实际内容重建索引
 配置保存在 `%LOCALAPPDATA%\blocksync\config.json`，仅对当前机器有效。图形界面启动时会用保存的目录自动填充；`push`、`apply`、`init`、`repair`、`status`、`verify` 省略目录时也读取这份配置。`sync` 必须显式给出两个目录：
 
 ```bat
-dist\blocksync.exe sync "D:\data\project" "E:\backup\project"
-dist\blocksync.exe sync "D:\data\project" "E:\backup\project" --reverse --verify
+dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project"
+dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project" --reverse --verify
 ```
 
 第二条命令中 `--reverse` 交换两个目录，实际从 `E:\backup\project` 同步回 `D:\data\project`。
@@ -162,7 +162,7 @@ dist\blocksync.exe sync "D:\data\project" "E:\backup\project" --reverse --verify
 查看当前配置：
 
 ```bat
-dist\blocksync.exe setup --show
+dist\BlockSync-CLI.exe setup --show
 ```
 
 同样的操作也可以在图形界面里完成：填好两个目录点“开始同步”；“写入后复读校验”默认已勾选，不需要额外校验时再取消。
@@ -181,7 +181,7 @@ dist\blocksync.exe setup --show
 
 ## 五、图形界面（可选）
 
-不使用命令行时，可直接运行 `dist\blocksync-ui.exe`。该程序不包含同步逻辑，仅根据界面上的目录与选项调用 `blocksync.exe sync`，并显示其输出；因此界面行为与命令行完全一致。
+不使用命令行时，可直接运行 `dist\BlockSync-GUI.exe`。该程序不包含同步逻辑，仅根据界面上的目录与选项调用 `BlockSync-CLI.exe sync`，并显示其输出；因此界面行为与命令行完全一致。
 
 ![界面示意](blocksync-ui.png)
 
@@ -202,9 +202,9 @@ dist\blocksync.exe setup --show
 
 测试比对会只读检查两侧 `.blocksync\lock`，存在时只在日志提示，不弹窗。正式同步因目录锁失败退出后，界面会弹“是/否”：选“是”用同一组参数加 `--force` 重试一次，选“否”保留失败日志；重试再失败不会继续弹窗。
 
-`blocksync-ui.exe` 已内置主程序，只使用内置副本：每次启动把它释放到系统临时目录并在同步结束后删除，因此既不需要随包提供 `blocksync.exe`，也不会出现内外版本不一致。只拷贝 `blocksync-ui.exe` 一个文件即可使用。
+`BlockSync-GUI.exe` 已内置主程序，只使用内置副本：每次启动把它释放到系统临时目录并在同步结束后删除，因此既不需要随包提供 `BlockSync-CLI.exe`，也不会出现内外版本不一致。只拷贝 `BlockSync-GUI.exe` 一个文件即可使用。
 
-少数安全软件会把“程序释放并启动另一个可执行文件”识别为可疑行为，这是单文件形态的固有代价；遇到拦截时改用 `dist\blocksync.exe` 直接同步即可，功能完全一致。
+少数安全软件会把“程序释放并启动另一个可执行文件”识别为可疑行为，这是单文件形态的固有代价；遇到拦截时改用 `dist\BlockSync-CLI.exe` 直接同步即可，功能完全一致。
 
 ---
 
@@ -212,13 +212,13 @@ dist\blocksync.exe setup --show
 
 | 文件 | 用途 |
 |---|---|
-| `dist\blocksync.exe` | 主程序，单文件，不依赖任何运行时环境 |
-| `dist\blocksync-ui.exe` | 图形界面（可选），已内置主程序，可单独使用 |
+| `dist\BlockSync-CLI.exe` | 主程序，单文件，不依赖任何运行时环境 |
+| `dist\BlockSync-GUI.exe` | 图形界面（可选），已内置主程序，可单独使用 |
 | `模拟测试.ps1` | 本地演练，自动执行完整流程并自检 |
 | `模拟改动.ps1` | 向文件写入精细改动，用于观察增量效果 |
 | `build.cmd` | 重新编译两个可执行文件，并把主程序嵌入界面程序（需要 Go 工具链，且 `go` 在 PATH 中） |
 
-`dist` 目录可整体复制到其他 64 位 Windows 机器直接使用；也可以只取 `blocksync-ui.exe` 一个文件。日常流程与各子命令见 `blocksync.exe --help`。
+`dist` 目录可整体复制到其他 64 位 Windows 机器直接使用；也可以只取 `BlockSync-GUI.exe` 一个文件。日常流程与各子命令见 `BlockSync-CLI.exe --help`。
 
 ---
 

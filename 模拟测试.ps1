@@ -11,7 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
-$exe = Join-Path $PSScriptRoot 'dist\blocksync.exe'
+$exe = Join-Path $PSScriptRoot 'dist\BlockSync-CLI.exe'
 if (-not (Test-Path $exe)) { throw "找不到 $exe" }
 
 $A = Join-Path $Root 'A'   # 模拟本机源目录

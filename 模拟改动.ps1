@@ -145,5 +145,5 @@ Write-Host ("修改时间：{0} -> {1}" -f $mtimeBefore.ToString('HH:mm:ss'), $a
 $dir = Split-Path -Parent $Path
 Write-Host ""
 Write-Host "下一步可查看同步将传输的数据量（不写入任何文件）：" -ForegroundColor Cyan
-Write-Host ("  dist\blocksync.exe sync `"{0}`" `"<输出目录>`" --dry-run" -f $dir)
+Write-Host ("  dist\BlockSync-CLI.exe sync `"{0}`" `"<输出目录>`" --dry-run" -f $dir)
 Write-Host ("预期那行会显示 变化块 约 {0:N1} KiB" -f ($expected / 1KB))

@@ -13,21 +13,21 @@ if errorlevel 1 (
 
 if not exist "dist" mkdir "dist"
 
-echo Building dist\blocksync.exe ...
-go build -trimpath -ldflags "-s -w" -o dist\blocksync.exe .\cmd\blocksync
+echo Building dist\BlockSync-CLI.exe ...
+go build -trimpath -ldflags "-s -w" -o dist\BlockSync-CLI.exe .\cmd\blocksync
 if errorlevel 1 goto failed
 
 echo Embedding it into the GUI (single-file mode) ...
 if not exist "cmd\blocksync-ui\embedded" mkdir "cmd\blocksync-ui\embedded"
-copy /Y "dist\blocksync.exe" "cmd\blocksync-ui\embedded\blocksync.exe" >nul
+copy /Y "dist\BlockSync-CLI.exe" "cmd\blocksync-ui\embedded\BlockSync-CLI.exe" >nul
 if errorlevel 1 goto failed
 
-echo Building dist\blocksync-ui.exe ...
-go build -trimpath -tags embedcli -ldflags "-H windowsgui -s -w" -o dist\blocksync-ui.exe .\cmd\blocksync-ui
+echo Building dist\BlockSync-GUI.exe ...
+go build -trimpath -tags embedcli -ldflags "-H windowsgui -s -w" -o dist\BlockSync-GUI.exe .\cmd\blocksync-ui
 if errorlevel 1 goto failed
 
 echo.
-echo [OK] dist\blocksync.exe and dist\blocksync-ui.exe rebuilt
+echo [OK] dist\BlockSync-CLI.exe and dist\BlockSync-GUI.exe rebuilt
 pause
 exit /b 0
 
