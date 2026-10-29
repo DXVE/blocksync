@@ -139,9 +139,8 @@ const (
 	mbIconInfo    = 0x00000040
 	idYes         = 6
 
-	mfString    = 0x00000000
-	mfPopup     = 0x00000010
-	mfSeparator = 0x00000800
+	mfString = 0x00000000
+	mfPopup  = 0x00000010
 
 	swShow = 5
 
@@ -276,21 +275,14 @@ const (
 	idSync    = 1007
 	idDry     = 1008
 	idCancel  = 1009
-	idSave    = 1010
 	idOpen    = 1011
 	idStatus  = 1012
 	idProg    = 1013
 	idLog     = 1014
 	idSwap    = 1015
 	idOpenSrc = 1016
-	idMenuExc = 1017
 	idCfgMgr  = 1018
 	timerID   = 1
-
-	idExEdit   = 2001
-	idExOk     = 2002
-	idExCancel = 2003
-	idExSample = 2004
 
 	idCfgList      = 3001
 	idCfgName      = 3002
@@ -304,8 +296,6 @@ const (
 	idCfgSave      = 3011
 	idCfgDelete    = 3012
 	idCfgApply     = 3013
-
-	idNameEdit = 4001
 
 	idDlgOk     = 1
 	idDlgCancel = 2
@@ -345,12 +335,6 @@ var (
 	reProgress = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
 	reResult   = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
 
-	hExDlg, hExEdit syscall.Handle
-	exDlgText       string
-	exDlgOK         bool
-	exDlgDone       bool
-	exClassReady    bool
-
 	hCfgDlg, hCfgList                  syscall.Handle
 	hCfgName, hCfgSrc, hCfgDst, hCfgEx syscall.Handle
 	hCfgBrowseSrc, hCfgBrowseDst       syscall.Handle
@@ -360,10 +344,6 @@ var (
 	cfgDlgDirty                        bool
 	cfgListBusy                        bool
 	cfgApplied                         appliedProfile
-
-	hSaveNameDlg, hSaveNameEdit syscall.Handle
-	saveNameText                string
-	saveNameOK                  bool
 )
 
 // excludeSample 排除列表的基础示例，首次打开对话框时预填。
@@ -791,20 +771,14 @@ func setRunningUI(on bool) {
 	enable(hChkFull, !on)
 }
 
-// buildMenu 创建菜单栏：保存配置与打开目录收进菜单，比对与同步留在主界面。
+// buildMenu 创建菜单栏：打开目录收进菜单，比对与同步留在主界面。
 func buildMenu() syscall.Handle {
 	menu, _, _ := pCreateMenu.Call()
 
 	dir, _, _ := pCreatePopupMenu.Call()
-	pAppendMenuW.Call(dir, mfString, idSave, uintptr(unsafe.Pointer(u16("保存为配置…"))))
-	pAppendMenuW.Call(dir, mfSeparator, 0, 0)
 	pAppendMenuW.Call(dir, mfString, idOpenSrc, uintptr(unsafe.Pointer(u16("打开原目录"))))
 	pAppendMenuW.Call(dir, mfString, idOpen, uintptr(unsafe.Pointer(u16("打开输出目录"))))
 	pAppendMenuW.Call(menu, mfPopup, dir, uintptr(unsafe.Pointer(u16("目录"))))
-
-	settings, _, _ := pCreatePopupMenu.Call()
-	pAppendMenuW.Call(settings, mfString, idMenuExc, uintptr(unsafe.Pointer(u16("排除列表…"))))
-	pAppendMenuW.Call(menu, mfPopup, settings, uintptr(unsafe.Pointer(u16("设置"))))
 
 	return syscall.Handle(menu)
 }
@@ -818,45 +792,7 @@ func openFolder(path string) {
 		uintptr(unsafe.Pointer(u16(path))), 0, 0, swShow)
 }
 
-// ---------- 排除列表对话框 ----------
-
-// openExcludeDialog 读取当前目录对的排除列表，编辑确认后写回本机配置。
-func openExcludeDialog() {
-	if running {
-		return
-	}
-	src, dst := currentDirs()
-	if src == "" || dst == "" {
-		msgBox("请先选择输入目录和输出目录。", mbOk|mbIconError)
-		return
-	}
-	initial := strings.Join(excludeSample, "\r\n")
-	if cfg, err := state.LoadConfig(); err == nil && cfg != nil {
-		if list := cfg.ExcludesFor(src, dst); list != nil {
-			initial = strings.Join(list, "\r\n")
-		}
-	}
-	text, ok := showExcludeDialog(initial)
-	bringToFront(mainHwnd)
-	if !ok {
-		return
-	}
-	list := splitExcludeLines(text)
-	cfg, err := state.LoadConfig()
-	if err != nil {
-		msgBox("读取配置失败："+err.Error(), mbOk|mbIconError)
-		return
-	}
-	if cfg == nil {
-		cfg = &state.Config{}
-	}
-	cfg.SetExcludes(src, dst, list)
-	if err := state.SaveConfig(cfg); err != nil {
-		msgBox("保存排除列表失败："+err.Error(), mbOk|mbIconError)
-		return
-	}
-	setText(hStatus, fmt.Sprintf("已保存 %d 条排除规则（当前目录对）", len(list)))
-}
+// ---------- 排除规则文本 ----------
 
 // splitExcludeLines 按行拆分并去掉空行。
 func splitExcludeLines(text string) []string {
@@ -880,140 +816,7 @@ func validateExcludeText(text string) error {
 	return nil
 }
 
-// showExcludeDialog 用系统模态对话框编辑排除列表；返回文本与是否确认。
-func showExcludeDialog(initial string) (string, bool) {
-	exDlgText, exDlgOK = initial, false
-	tpl := buildExcludeTemplate()
-	ret, _, _ := pDialogBoxIndirectParamW.Call(
-		uintptr(hInstance),
-		uintptr(unsafe.Pointer(&tpl[0])),
-		uintptr(mainHwnd),
-		exDlgCallback(),
-		0)
-	runtime.KeepAlive(tpl)
-	if ret == ^uintptr(0) {
-		msgBox("无法打开排除列表对话框。", mbOk|mbIconError)
-		return initial, false
-	}
-	if !exDlgOK {
-		return initial, false
-	}
-	return exDlgText, true
-}
-
-var (
-	exDlgCbOnce sync.Once
-	exDlgCb     uintptr
-)
-
-// exDlgCallback 复用同一个对话框过程回调，避免重复注册占用回调槽位。
-func exDlgCallback() uintptr {
-	exDlgCbOnce.Do(func() { exDlgCb = syscall.NewCallback(exDlgProc) })
-	return exDlgCb
-}
-
-// exDlgProc 排除列表对话框的窗口过程；激活、焦点与回车/ESC 由系统模态循环处理。
-func exDlgProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
-	switch m {
-	case wmInitDialog:
-		hExDlg = hwnd
-		hExEdit = getDlgItem(hwnd, idExEdit)
-		setText(hExEdit, exDlgText)
-		pSendMessageW.Call(uintptr(hExEdit), emSetLimitTxt, 100000, 0)
-		pSetFocus.Call(uintptr(hExEdit))
-		// 对话框管理器在 WM_INITDIALOG 返回后才设置焦点，异步清掉默认全选
-		pPostMessageW.Call(uintptr(hExEdit), emSetSel, 0, 0)
-		centerOnOwner(hwnd)
-		return 1
-
-	case wmCommand:
-		switch int(wParam & 0xFFFF) {
-		case idExSample:
-			setText(hExEdit, strings.Join(excludeSample, "\r\n"))
-		case idDlgOk:
-			text := getText(hExEdit)
-			if err := validateExcludeText(text); err != nil {
-				msgBoxOwner(hwnd, err.Error(), mbOk|mbIconError)
-				return 1
-			}
-			exDlgText, exDlgOK = text, true
-			pEndDialog.Call(uintptr(hwnd), 1)
-		case idDlgCancel:
-			pEndDialog.Call(uintptr(hwnd), 0)
-		}
-		return 1
-
-	case wmClose:
-		pEndDialog.Call(uintptr(hwnd), 0)
-		return 1
-
-	case wmDestroy:
-		hExDlg, hExEdit = 0, 0
-	}
-	return 0
-}
-
-// buildExcludeTemplate 构造排除列表对话框的内存模板（DLGTEMPLATE），
-// 尺寸使用对话框单位，字体与主界面一致（Segoe UI 9pt）。
-func buildExcludeTemplate() []byte {
-	var b []byte
-	put16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
-	put32 := func(v uint32) { b = append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24)) }
-	putText := func(s string) {
-		u, err := syscall.UTF16FromString(s)
-		if err != nil {
-			u = []uint16{0}
-		}
-		for _, c := range u {
-			b = append(b, byte(c), byte(c>>8))
-		}
-	}
-	align4 := func() {
-		for len(b)%4 != 0 {
-			b = append(b, 0)
-		}
-	}
-
-	put32(dsSetFont | dsModalFrame | wsPopup | wsCaption | wsSysMenu)
-	put32(0)
-	put16(7)
-	put16(0)
-	put16(0)
-	put16(300)
-	put16(190)
-	put16(0)
-	put16(0)
-	putText("排除列表")
-	put16(9)
-	putText("Segoe UI")
-
-	item := func(style uint32, x, y, cx, cy int16, id uint16, class uint16, text string) {
-		align4()
-		put32(style)
-		put32(0)
-		put16(uint16(x))
-		put16(uint16(y))
-		put16(uint16(cx))
-		put16(uint16(cy))
-		put16(id)
-		put16(0xFFFF)
-		put16(class)
-		putText(text)
-		put16(0)
-	}
-
-	item(wsChild|wsVisible, 8, 7, 40, 9, 0xFFFF, atomStatic, "排除:")
-	item(wsChild|wsVisible|wsTabStop|wsBorder|wsVScroll|esMultiline|esAutovscroll|esWantReturn,
-		8, 17, 284, 124, idExEdit, atomEdit, "")
-	item(wsChild|wsVisible|wsTabStop|bsPushbutton, 8, 147, 52, 14, idExSample, atomButton, "填入示例")
-	item(wsChild|wsVisible|wsTabStop|bsDefPushbutton, 176, 147, 52, 14, idDlgOk, atomButton, "确定")
-	item(wsChild|wsVisible|wsTabStop|bsPushbutton, 232, 147, 52, 14, idDlgCancel, atomButton, "取消")
-	item(wsChild|wsVisible, 8, 166, 284, 8, 0xFFFF, atomStatic, `每行一条；\ 为分隔符；行首 \ 锚定根目录；行尾 \ 表示整个目录`)
-	item(wsChild|wsVisible, 8, 176, 284, 8, 0xFFFF, atomStatic, "通配符：* 匹配不含分隔符的任意字符，? 匹配单个字符")
-	align4()
-	return b
-}
-
+// getDlgItem 取对话框内指定 id 的控件句柄。
 func getDlgItem(hwnd syscall.Handle, id int) syscall.Handle {
 	r, _, _ := pGetDlgItem.Call(uintptr(hwnd), uintptr(id))
 	return syscall.Handle(r)
@@ -1034,139 +837,6 @@ func centerOnOwner(hwnd syscall.Handle) {
 		y = 0
 	}
 	pSetWindowPos.Call(uintptr(hwnd), 0, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpNoZOrder)
-}
-
-// ---------- 保存配置命名对话框 ----------
-
-// showSaveNameDialog 让用户确认配置名称，同时展示要保存的两个目录；取消不产生任何写入。
-func showSaveNameDialog(name, src, dst string) (string, bool) {
-	saveNameText, saveNameOK = name, false
-	tpl := buildSaveNameTemplate(src, dst)
-	ret, _, _ := pDialogBoxIndirectParamW.Call(
-		uintptr(hInstance),
-		uintptr(unsafe.Pointer(&tpl[0])),
-		uintptr(mainHwnd),
-		saveNameDlgCallback(),
-		0)
-	runtime.KeepAlive(tpl)
-	if ret == ^uintptr(0) {
-		msgBox("无法打开保存配置对话框。", mbOk|mbIconError)
-		return name, false
-	}
-	return saveNameText, saveNameOK
-}
-
-var (
-	saveNameCbOnce sync.Once
-	saveNameCb     uintptr
-)
-
-// saveNameDlgCallback 复用同一个对话框过程回调，避免重复注册占用回调槽位。
-func saveNameDlgCallback() uintptr {
-	saveNameCbOnce.Do(func() { saveNameCb = syscall.NewCallback(saveNameDlgProc) })
-	return saveNameCb
-}
-
-// saveNameDlgProc 命名对话框的窗口过程；名称预填并全选，直接输入即可替换。
-func saveNameDlgProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
-	switch m {
-	case wmInitDialog:
-		hSaveNameDlg = hwnd
-		hSaveNameEdit = getDlgItem(hwnd, idNameEdit)
-		setText(hSaveNameEdit, saveNameText)
-		pSendMessageW.Call(uintptr(hSaveNameEdit), emSetLimitTxt, 120, 0)
-		pSetFocus.Call(uintptr(hSaveNameEdit))
-		// 对话框管理器在 WM_INITDIALOG 返回后才设置焦点，异步全选便于直接覆盖输入
-		pPostMessageW.Call(uintptr(hSaveNameEdit), emSetSel, 0, ^uintptr(0))
-		centerOnOwner(hwnd)
-		return 1
-
-	case wmCommand:
-		switch int(wParam & 0xFFFF) {
-		case idDlgOk:
-			name := strings.TrimSpace(getText(hSaveNameEdit))
-			if name == "" {
-				msgBoxOwner(hwnd, "配置名称不能为空。", mbOk|mbIconError)
-				return 1
-			}
-			saveNameText, saveNameOK = name, true
-			pEndDialog.Call(uintptr(hwnd), 1)
-		case idDlgCancel:
-			pEndDialog.Call(uintptr(hwnd), 0)
-		default:
-			return 0
-		}
-		return 1
-
-	case wmClose:
-		pEndDialog.Call(uintptr(hwnd), 0)
-		return 1
-
-	case wmDestroy:
-		hSaveNameDlg, hSaveNameEdit = 0, 0
-	}
-	return 0
-}
-
-// buildSaveNameTemplate 构造命名对话框的内存模板；目录行过长时尾部省略。
-func buildSaveNameTemplate(src, dst string) []byte {
-	var b []byte
-	put16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
-	put32 := func(v uint32) { b = append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24)) }
-	putText := func(s string) {
-		u, err := syscall.UTF16FromString(s)
-		if err != nil {
-			u = []uint16{0}
-		}
-		for _, c := range u {
-			b = append(b, byte(c), byte(c>>8))
-		}
-	}
-	align4 := func() {
-		for len(b)%4 != 0 {
-			b = append(b, 0)
-		}
-	}
-
-	put32(dsSetFont | dsModalFrame | wsPopup | wsCaption | wsSysMenu)
-	put32(0)
-	put16(9)
-	put16(0)
-	put16(0)
-	put16(260)
-	put16(92)
-	put16(0)
-	put16(0)
-	putText("保存配置")
-	put16(9)
-	putText("Segoe UI")
-
-	item := func(style uint32, x, y, cx, cy int16, id uint16, class uint16, text string) {
-		align4()
-		put32(style)
-		put32(0)
-		put16(uint16(x))
-		put16(uint16(y))
-		put16(uint16(cx))
-		put16(uint16(cy))
-		put16(id)
-		put16(0xFFFF)
-		put16(class)
-		putText(text)
-		put16(0)
-	}
-
-	item(wsChild|wsVisible, 8, 10, 40, 9, 0xFFFF, atomStatic, "配置名称:")
-	item(wsChild|wsVisible|wsTabStop|wsBorder|esAutohscroll, 52, 8, 200, 14, idNameEdit, atomEdit, "")
-	item(wsChild|wsVisible, 8, 30, 24, 9, 0xFFFF, atomStatic, "输入:")
-	item(wsChild|wsVisible|ssEndEllipsis|ssNoPrefix, 34, 30, 218, 9, 0xFFFF, atomStatic, src)
-	item(wsChild|wsVisible, 8, 42, 24, 9, 0xFFFF, atomStatic, "输出:")
-	item(wsChild|wsVisible|ssEndEllipsis|ssNoPrefix, 34, 42, 218, 9, 0xFFFF, atomStatic, dst)
-	item(wsChild|wsVisible|ssNoPrefix, 8, 56, 244, 8, 0xFFFF, atomStatic, "同名配置若目录不同，确认后覆盖其目录；取消不保存任何内容")
-	item(wsChild|wsVisible|wsTabStop|bsDefPushbutton, 144, 72, 52, 14, idDlgOk, atomButton, "保存")
-	item(wsChild|wsVisible|wsTabStop|bsPushbutton, 200, 72, 52, 14, idDlgCancel, atomButton, "取消")
-	align4()
-	return b
 }
 
 // ---------- 配置管理对话框 ----------
@@ -1561,7 +1231,7 @@ func cfgDeleteCurrent(owner syscall.Handle) {
 }
 
 // buildConfigTemplate 构造配置管理对话框的内存模板（DLGTEMPLATE），
-// 列表为 SysListView32，其余控件与排除列表对话框同一套系统样式。
+// 列表为 SysListView32，其余控件沿用同一套系统样式。
 func buildConfigTemplate() []byte {
 	var b []byte
 	put16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
@@ -1843,57 +1513,6 @@ func wndProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
 					setText(hStatus, "正在中止…")
 				}
 			}
-		case idSave:
-			src, dst := currentDirs()
-			if src == "" || dst == "" {
-				msgBox("请先选择输入目录和输出目录。", mbOk|mbIconError)
-				return 0
-			}
-			if state.SameDir(src, dst) {
-				msgBox("输入目录和输出目录不能是同一个。", mbOk|mbIconError)
-				return 0
-			}
-			cfg, err := state.LoadConfig()
-			if err != nil {
-				msgBox("读取配置失败："+err.Error(), mbOk|mbIconError)
-				return 0
-			}
-			if cfg == nil {
-				cfg = &state.Config{}
-			}
-			// 每次点击都重新取当前目录与建议名称：同目录对的配置用其名称，否则用下一个空闲序号
-			suggest := cfg.MatchProfile(src, dst)
-			if suggest == "" {
-				suggest = cfg.NextProfileName()
-			}
-			name, ok := showSaveNameDialog(suggest, src, dst)
-			bringToFront(mainHwnd)
-			if !ok {
-				return 0
-			}
-			// 同名即确认覆盖：把该配置的排除规则搬到新目录对，再写入当前目录
-			if _, old := cfg.FindProfile(name); old != nil {
-				body := fmt.Sprintf("配置“%s”已存在：\r\n\r\n旧：%s → %s\r\n新：%s → %s\r\n\r\n要用当前目录覆盖它吗？",
-					old.Name, old.LocalDir, old.CarrierDir, src, dst)
-				if msgBox(body, mbYesNo|mbIconWarning) != idYes {
-					bringToFront(mainHwnd)
-					return 0
-				}
-				cfg.MigrateExcludes(old.LocalDir, old.CarrierDir, src, dst, old.Name)
-			}
-			cfg.SetProfile("", state.Profile{Name: name, LocalDir: src, CarrierDir: dst})
-			cfg.LocalDir, cfg.CarrierDir = src, dst
-			cfg.ActiveProfile = name
-			// 新目录对没有排除规则时写入示例规则
-			seedExcludes(cfg)
-			if err := state.SaveConfig(cfg); err != nil {
-				msgBox("保存失败："+err.Error(), mbOk|mbIconError)
-			} else {
-				msgBox("已保存为配置“"+name+"”，下次打开会自动填好。", mbOk|mbIconInfo)
-			}
-			bringToFront(mainHwnd)
-		case idMenuExc:
-			openExcludeDialog()
 		case idCfgMgr:
 			openConfigDialog()
 		case idOpen:
