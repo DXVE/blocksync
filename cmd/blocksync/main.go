@@ -15,9 +15,12 @@ import (
 	"blocksync/internal/mirror"
 	"blocksync/internal/scan"
 	"blocksync/internal/state"
+	"blocksync/internal/version"
 )
 
-const usageText = `blocksync —— 大目录/大文件的块级增量同步
+const usageText = `blocksync ` + version.Version + ` —— 大目录/大文件的块级增量同步
+
+版本: ` + version.Version + `
 
 用法:
 
@@ -31,6 +34,7 @@ const usageText = `blocksync —— 大目录/大文件的块级增量同步
   blocksync status [<目录>]             查看该目录的索引与状态
   blocksync verify [<目录>]             全量复算，检查内容与索引是否一致
   blocksync repair [<目录>]             按磁盘实际内容重建索引
+  blocksync version                     显示版本号
 
 日常流程（同样可在图形界面中点选完成）:
   blocksync setup                       首次：录入并保存两个目录
@@ -71,6 +75,9 @@ func main() {
 		err = cmdSetup(os.Args[2:])
 	case "verify":
 		err = cmdVerify(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Println("blocksync " + version.Version)
+		return
 	case "-h", "--help", "help":
 		fmt.Print(usageText)
 		return

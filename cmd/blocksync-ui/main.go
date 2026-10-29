@@ -20,6 +20,7 @@ import (
 
 	"blocksync/internal/scan"
 	"blocksync/internal/state"
+	"blocksync/internal/version"
 )
 
 var (
@@ -103,6 +104,7 @@ const (
 
 	ssSunken      = 0x00000500
 	ssCenterImage = 0x00000200
+	ssRight       = 0x00000002
 	ssNoPrefix    = 0x00000080
 	ssEndEllipsis = 0x00004000
 
@@ -1763,6 +1765,8 @@ func onCreate() {
 	pSendMessageW.Call(uintptr(hProgress), pbmSetRange32, 0, 100)
 
 	label("日志", 16, 186, 60)
+	// 版本号与命令行共用同一常量
+	create("STATIC", "版本 "+version.Version, wsChild|wsVisible|ssRight, 600, 186, 112, 22, 0)
 	hLog = create("EDIT", "",
 		wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutovscroll|esReadonly,
 		16, 208, 696, 292, idLog)
@@ -1957,7 +1961,7 @@ func main() {
 	cursor, _, _ := pLoadCursorW.Call(0, 32512) // IDC_ARROW
 
 	className := u16("blocksyncUIWindow")
-	title := u16("blocksync - 文件增量同步")
+	title := u16("blocksync - 文件增量同步 " + version.Version)
 
 	cb := syscall.NewCallback(wndProc)
 	wc := wndClassEx{

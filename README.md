@@ -48,7 +48,7 @@ Windows 64 位单文件程序，不需要安装，也没有任何运行时依赖
 build.cmd
 ```
 
-产物写入 `dist\`：先编译 CLI，再把 CLI 嵌入 GUI（单文件形态）。
+产物写入 `dist\`：先编译 CLI，再把 CLI 嵌入 GUI（单文件形态）。版本号只定义在 `internal/version/version.go`，CLI 与 GUI 都从这里读取。
 
 自动化测试与本地演练：
 
@@ -77,6 +77,7 @@ dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project"
 | `blocksync sync <输入> <输出>` | 把输入目录增量镜像到输出目录；反向同步交换参数顺序 |
 | `blocksync setup` | 交互录入或修改本机的两个目录（供 verify/repair/status 与 GUI 使用） |
 | `blocksync status / verify / repair <目录>` | 查看索引覆盖 / 校验一致性 / 重建索引 |
+| `blocksync version` | 显示版本号（`-v`、`--version` 等价） |
 
 常用选项：
 
