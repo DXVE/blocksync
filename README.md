@@ -136,4 +136,4 @@ dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project"
 
 ## 许可证
 
-仓库尚未添加 LICENSE 文件，许可证待定；确定前请先与作者联系获取使用授权。
+[MIT](LICENSE) 许可证，允许自由使用、修改、再分发与商业使用，保留版权声明与许可声明即可。
