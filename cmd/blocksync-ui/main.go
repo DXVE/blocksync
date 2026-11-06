@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"blocksync/internal/mirror"
 	"blocksync/internal/scan"
 	"blocksync/internal/state"
 	"blocksync/internal/version"
@@ -87,7 +87,6 @@ const (
 	wsTabStop = 0x00010000
 	wsBorder  = 0x00800000
 	wsVScroll = 0x00200000
-	wsHScroll = 0x00100000
 
 	esMultiline   = 0x0004
 	esAutovscroll = 0x0040
@@ -105,8 +104,6 @@ const (
 	ssSunken      = 0x00000500
 	ssCenterImage = 0x00000200
 	ssRight       = 0x00000002
-	ssNoPrefix    = 0x00000080
-	ssEndEllipsis = 0x00004000
 
 	wsPopup   = 0x80000000
 	wsCaption = 0x00C00000
@@ -138,6 +135,7 @@ const (
 	mbIconWarning = 0x00000030
 	mbIconInfo    = 0x00000040
 	idYes         = 6
+	mbDefButton2  = 0x00000100
 
 	mfString = 0x00000000
 	mfPopup  = 0x00000010
@@ -297,7 +295,6 @@ const (
 	idCfgDelete    = 3012
 	idCfgApply     = 3013
 
-	idDlgOk     = 1
 	idDlgCancel = 2
 )
 
@@ -328,12 +325,10 @@ var (
 	cancelled  bool
 	proc       *exec.Cmd
 	logChars   int
+	runLog     []string // 本次运行的全部输出行（仅界面线程读写），结束判定不能只看最后一批
 
 	lastSrc, lastDst                                   string
 	lastDry, lastVerify, lastFull, lastForce, lastMass bool
-
-	reProgress = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
-	reResult   = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
 
 	hCfgDlg, hCfgList                  syscall.Handle
 	hCfgName, hCfgSrc, hCfgDst, hCfgEx syscall.Handle
@@ -360,9 +355,6 @@ var excludeSample = []string{
 	`thumbs.db`,
 	`.DS_Store`,
 }
-
-// confirmMarker 与 BlockSync-CLI 中的同名常量保持一致：出现该行时子进程在等待确认。
-const confirmMarker = "需要确认后才会开始写入"
 
 // seedExcludes 为尚无排除记录的目录对写入示例规则作为默认值；
 // 已有记录（包括用户清空后留下的空列表）保持不动，不会被重新填充。
@@ -553,6 +545,10 @@ func appendLogText(lines []string) {
 	pSendMessageW.Call(uintptr(hLog), emReplaceSel, 0, uintptr(unsafe.Pointer(u16(text))))
 	pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
 	logChars += len(text)
+	runLog = append(runLog, lines...)
+	if len(runLog) > 2000 {
+		runLog = append(runLog[:0], runLog[len(runLog)-2000:]...)
+	}
 	if logChars > 500000 {
 		setText(hLog, "")
 		setText(hLog, text)
@@ -619,6 +615,7 @@ func startRun(dry, verify, full, force, allowMass bool) {
 	mu.Unlock()
 	// 先把上一次运行遗留的行写入，再插入分隔行，保证先后顺序
 	flushPendingLog()
+	runLog = nil
 	if logChars > 0 {
 		if dry {
 			appendLog("", "----- 测试比对 -----")
@@ -686,7 +683,7 @@ func startRun(dry, verify, full, force, allowMass bool) {
 				cancelled = true
 				mu.Unlock()
 			}
-			if strings.Contains(line, confirmMarker) {
+			if strings.Contains(line, mirror.ConfirmMarker) {
 				// 子进程打印该行后停在标准输入等待答复
 				body := confirmBody(recent)
 				if body == "" {
@@ -705,7 +702,7 @@ func startRun(dry, verify, full, force, allowMass bool) {
 			if len(recent) > 12 {
 				recent = recent[len(recent)-12:]
 			}
-			if m := reProgress.FindStringSubmatch(line); m != nil {
+			if m := mirror.ProgressPattern.FindStringSubmatch(line); m != nil {
 				c, _ := strconv.Atoi(m[1])
 				t, _ := strconv.Atoi(m[2])
 				mu.Lock()
@@ -749,7 +746,7 @@ func confirmBody(lines []string) string {
 	var out []string
 	for _, l := range lines {
 		t := strings.TrimSpace(l)
-		if t == "" || strings.HasPrefix(t, "输入：") || strings.HasPrefix(t, "输出：") || strings.Contains(l, confirmMarker) {
+		if t == "" || strings.HasPrefix(t, "输入：") || strings.HasPrefix(t, "输出：") || strings.Contains(l, mirror.ConfirmMarker) {
 			continue
 		}
 		out = append(out, l)
@@ -1353,11 +1350,11 @@ func flushUI() {
 			done = 100
 		}
 		pSendMessageW.Call(uintptr(hProgress), pbmSetPos, done, 0)
-		joined := strings.Join(lines, "\n")
+		joined := strings.Join(runLog, "\n")
 		if wasCancelled {
 			setText(hStatus, "已取消，未写入任何文件")
 		} else if code == 0 {
-			if m := reResult.FindStringSubmatch(joined); m != nil {
+			if m := mirror.ResultPattern.FindStringSubmatch(joined); m != nil {
 				if m[1] != "" {
 					setText(hStatus, fmt.Sprintf("测试比对：需改动 %s 个文件、删除 %s 个；读取 %s，预计需写入 %s（未改动数据）", m[3], m[4], m[5], m[6]))
 				} else {
@@ -1389,8 +1386,11 @@ func flushUI() {
 						body.WriteString("\r\n")
 					}
 				}
-				body.WriteString("\r\n可能是上次异常退出遗留，也可能另一个同步正在运行。\r\n强制忽略锁并重试一次吗？")
-				if msgBox(body.String(), mbYesNo|mbIconWarning) == idYes {
+				body.WriteString("\r\n最可能的原因是有另一个 BlockSync（含另一个本程序窗口）正在同步同一对目录。\r\n")
+				body.WriteString("两个进程同时写同一对目录会互相破坏对方的数据与索引。\r\n\r\n")
+				body.WriteString("请先关闭其它窗口，确认没有同步在运行，再选择「是」接管锁并重试；\r\n")
+				body.WriteString("不确定时请选「否」，等确认后再手动重试。")
+				if msgBox(body.String(), mbYesNo|mbIconWarning|mbDefButton2) == idYes {
 					startRun(lastDry, lastVerify, lastFull, true, lastMass)
 					return
 				}

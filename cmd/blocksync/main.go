@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"blocksync/internal/index"
@@ -90,13 +89,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func workersOrDefault(n int) int {
-	if n > 0 {
-		return n
-	}
-	return runtime.NumCPU()
 }
 
 // reorder 把选项挪到位置参数之前，使 `blocksync sync A B --dry-run` 这种写法可用。
@@ -253,14 +245,39 @@ func runSetup() (*state.Config, error) {
 	return cfg, nil
 }
 
+// loadConfigOrWarn 读取本机配置；失败时提示一行并返回 nil，调用方退回内置规则。
+func loadConfigOrWarn() *state.Config {
+	cfg, err := state.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "提示：本机配置读取失败（%v），本次只用内置排除规则\n", err)
+		return nil
+	}
+	return cfg
+}
+
 // loadExcludes 汇总排除规则：内置默认 → 目录对的界面配置。
 // other 为同一次同步的另一侧目录；只有单侧目录时传空串。
 func loadExcludes(local, other string) []string {
 	ex := append([]string(nil), scan.DefaultExcludes...)
-	if other != "" {
-		if cfg, err := state.LoadConfig(); err == nil {
-			ex = append(ex, cfg.ExcludesFor(local, other)...)
-		}
+	if other == "" {
+		return ex
+	}
+	if cfg := loadConfigOrWarn(); cfg != nil {
+		ex = append(ex, cfg.ExcludesFor(local, other)...)
+	}
+	return ex
+}
+
+// loadExcludesForDir 供单目录命令（repair/verify）使用：从配置查出该目录所属
+// 目录对的另一侧，取到与 sync 相同的排除规则。
+func loadExcludesForDir(dir string) []string {
+	ex := append([]string(nil), scan.DefaultExcludes...)
+	cfg := loadConfigOrWarn()
+	if cfg == nil {
+		return ex
+	}
+	if other := cfg.OtherSide(dir); other != "" {
+		ex = append(ex, cfg.ExcludesFor(dir, other)...)
 	}
 	return ex
 }
@@ -271,21 +288,6 @@ func warnLegacyExcludes(dir string) {
 	if _, err := os.Stat(p); err == nil {
 		fmt.Fprintf(os.Stderr, "提示：%s 已停用，排除规则统一从本机配置读取\n", p)
 	}
-}
-
-func fmtSize(n uint64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	units := []string{"KiB", "MiB", "GiB", "TiB"}
-	v := float64(n)
-	i := -1
-	for v >= unit && i < len(units)-1 {
-		v /= unit
-		i++
-	}
-	return fmt.Sprintf("%.1f %s", v, units[i])
 }
 
 // ---------- repair ----------
@@ -333,17 +335,17 @@ func cmdRepair(args []string) error {
 	defer unlock()
 
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludes(local, "")
+	excludes := loadExcludesForDir(local)
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)
 	}
-	w := workersOrDefault(*workers)
+	w := scan.Workers(*workers)
 
 	var total uint64
 	for i, f := range files {
 		abs := filepath.Join(local, filepath.FromSlash(f.Rel))
-		fmt.Fprintf(os.Stderr, "[%d/%d] 建立索引 %s (%s)\n", i+1, len(files), f.Rel, fmtSize(uint64(f.Size)))
+		fmt.Fprintf(os.Stderr, "[%d/%d] 建立索引 %s (%s)\n", i+1, len(files), f.Rel, scan.FormatSize(uint64(f.Size)))
 		res, err := scan.ScanFull(abs, *lb, *sb, w)
 		if err != nil {
 			return fmt.Errorf("扫描 %s 失败: %w", f.Rel, err)
@@ -365,20 +367,17 @@ func cmdRepair(args []string) error {
 		}
 	}
 
-	fmt.Printf("完成：%d 个文件，共 %s\n", len(files), fmtSize(total))
+	fmt.Printf("完成：%d 个文件，共 %s\n", len(files), scan.FormatSize(total))
 	return nil
 }
 
 // ---------- sync ----------
 
-// 界面据此行判断需要弹出确认框，修改时两侧必须保持一致。
-const confirmMarker = "需要确认后才会开始写入"
-
 // askPlan 在实际写入前展示计划并要求确认；非交互输入按取消处理。
 func askPlan(p mirror.Plan) (bool, error) {
 	fmt.Print("\n" + p.Summary())
 	fmt.Println("写入只发生在输出目录，输入目录保持只读。")
-	fmt.Println(confirmMarker + "。")
+	fmt.Println(mirror.ConfirmMarker + "。")
 	fmt.Print("确认继续？[y/N]: ")
 	line, err := stdin.ReadString('\n')
 	line = strings.ToLower(strings.TrimSpace(line))
@@ -474,12 +473,12 @@ func cmdSync(args []string) error {
 	if *dry {
 		fmt.Printf("\n完成（测试比对）：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，预计需写入 %s（未改动任何数据）\n",
 			rep.FilesScanned, rep.FilesChanged, rep.FilesDeleted,
-			fmtSize(rep.BytesRead), fmtSize(rep.BytesWritten))
+			scan.FormatSize(rep.BytesRead), scan.FormatSize(rep.BytesWritten))
 		return nil
 	}
 	fmt.Printf("\n完成：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，写入 %s\n",
 		rep.FilesScanned, rep.FilesChanged, rep.FilesDeleted,
-		fmtSize(rep.BytesRead), fmtSize(rep.BytesWritten))
+		scan.FormatSize(rep.BytesRead), scan.FormatSize(rep.BytesWritten))
 	return nil
 }
 
@@ -551,12 +550,12 @@ func cmdStatus(args []string) error {
 	list, _ := store.List()
 	var indexed uint64
 	for _, rel := range list {
-		if f, err := store.Load(rel); err == nil && f != nil {
-			indexed += f.Size
+		if size, err := store.Size(rel); err == nil {
+			indexed += size
 		}
 	}
 	fmt.Printf("目录      : %s\n", local)
-	fmt.Printf("索引文件  : %d 个，覆盖 %s\n", len(list), fmtSize(indexed))
+	fmt.Printf("索引文件  : %d 个，覆盖 %s\n", len(list), scan.FormatSize(indexed))
 	return nil
 }
 
@@ -585,12 +584,12 @@ func cmdVerify(args []string) error {
 
 func verifyDir(local string, workers int, quiet bool) error {
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludes(local, "")
+	excludes := loadExcludesForDir(local)
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)
 	}
-	w := workersOrDefault(workers)
+	w := scan.Workers(workers)
 	disk := map[string]bool{}
 	bad := 0
 	for i, f := range files {
@@ -614,13 +613,21 @@ func verifyDir(local string, workers int, quiet bool) error {
 			bad++
 			continue
 		}
-		if d := scan.Compare(res.New, old); d != 0 {
+		switch d := scan.Compare(res.New, old); {
+		case d < 0:
+			fmt.Printf("内容不符  %s（文件长度与索引记录不同）\n", f.Rel)
+			bad++
+		case d > 0:
 			fmt.Printf("内容不符  %s（%d 个细块不一致）\n", f.Rel, d)
 			bad++
 		}
 	}
 	idxList, _ := store.List()
 	for _, rel := range idxList {
+		// 被排除规则跳过的文件没有索引是正常的，不算残留
+		if scan.Excluded(rel, excludes) {
+			continue
+		}
 		if !disk[rel] {
 			fmt.Printf("多余索引  %s\n", rel)
 			bad++

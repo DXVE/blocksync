@@ -94,6 +94,20 @@ func equalTrees(t *testing.T, a, b string) {
 	}
 }
 
+// 源文件在拷贝途中变短时必须报错，不能把缓冲区残留内容写进目标。
+func TestCopyRangesDetectsShortSource(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	dst := filepath.Join(dir, "dst.bin")
+	if err := os.WriteFile(src, bytes.Repeat([]byte("A"), 3000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ranges := []scan.Range{{Off: 0, Len: 4096}, {Off: 4096, Len: 904}}
+	if err := copyRanges(src, dst, ranges, 5000, 0); err == nil {
+		t.Fatal("源文件短读应返回错误，实际静默写入了目标")
+	}
+}
+
 func TestFirstSyncCopiesEverything(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	write(t, filepath.Join(src, "a.vmdk"), rnd(200*1024, 1))

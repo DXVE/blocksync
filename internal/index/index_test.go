@@ -68,6 +68,9 @@ func TestStoreSaveLoadDelete(t *testing.T) {
 	if err := s.Save("sub/dir/a.vmdk", f); err != nil {
 		t.Fatal(err)
 	}
+	if got, err := s.Size("sub/dir/a.vmdk"); err != nil || got != 5000 {
+		t.Fatalf("Size 应为 5000，实际 %d（err=%v）", got, err)
+	}
 	g, err := s.Load("sub/dir/a.vmdk")
 	if err != nil {
 		t.Fatal(err)

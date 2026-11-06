@@ -26,6 +26,15 @@ func rndBytes(n int, seed int64) []byte {
 	return b
 }
 
+// rangeBytes 汇总区间覆盖的字节数。
+func rangeBytes(rs []Range) uint64 {
+	var n uint64
+	for _, r := range rs {
+		n += r.Len
+	}
+	return n
+}
+
 // applyRanges 把变更区间套到旧内容上，得到应与新文件一致的结果；尾部按新长度截断。
 func applyRanges(old, cur []byte, ranges []Range) []byte {
 	out := append([]byte(nil), old...)
@@ -57,8 +66,8 @@ func TestScanFullStable(t *testing.T) {
 	if !a.New.EqualContent(b.New) {
 		t.Fatal("同一文件两次扫描结果应一致（与线程数无关）")
 	}
-	if a.ChangedBytes != uint64(300*1024) {
-		t.Fatalf("全量扫描应把整个文件视为变更，得到 %d", a.ChangedBytes)
+	if got := rangeBytes(a.Ranges); got != uint64(300*1024) {
+		t.Fatalf("全量扫描应把整个文件视为变更，得到 %d", got)
 	}
 }
 
@@ -73,8 +82,8 @@ func TestScanDiffNoChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Ranges) != 0 || res.ChangedBytes != 0 {
-		t.Fatalf("无改动时不应产生区间，得到 %d 段 %d 字节", len(res.Ranges), res.ChangedBytes)
+	if len(res.Ranges) != 0 || rangeBytes(res.Ranges) != 0 {
+		t.Fatalf("无改动时不应产生区间，得到 %d 段 %d 字节", len(res.Ranges), rangeBytes(res.Ranges))
 	}
 	if !res.New.EqualContent(base.New) {
 		t.Fatal("无改动时索引应保持不变")
@@ -133,8 +142,8 @@ func TestScanDiffMutations(t *testing.T) {
 			if !bytes.Equal(got, cur) {
 				t.Fatalf("按区间应用后与目标不一致：得到 %d 字节，期望 %d 字节", len(got), len(cur))
 			}
-			if res.ChangedBytes >= uint64(len(cur)) && tc.name != "整文件重写" {
-				t.Fatalf("变更量应小于文件大小，得到 %d / %d", res.ChangedBytes, len(cur))
+			if got := rangeBytes(res.Ranges); got >= uint64(len(cur)) && tc.name != "整文件重写" {
+				t.Fatalf("变更量应小于文件大小，得到 %d / %d", got, len(cur))
 			}
 			// 新索引必须与目标文件独立扫描的结果一致
 			full, err := ScanFull(p, testLB, testSB, 2)

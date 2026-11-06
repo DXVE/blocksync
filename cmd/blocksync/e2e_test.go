@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"blocksync/internal/mirror"
 	"blocksync/internal/state"
 )
 
@@ -347,6 +348,77 @@ func TestEndToEndPairExcludes(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(b, "sub", "cache.tmp")); !os.IsNotExist(err) {
 		t.Fatal("被排除的子目录文件不应被复制")
+	}
+}
+
+// 目录对排除规则必须在 sync/verify/repair 中一致：sync 不建被排除文件的索引，
+// verify 也不应因此报缺失，否则给出的 repair 修法会被下一次 sync 撤销。
+func TestPairExcludesConsistentAcrossCommands(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	_, a, b := setup(t)
+	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
+	writeFile(t, filepath.Join(a, "cache.tmp"), []byte("cached"))
+
+	cfg := &state.Config{LocalDir: a, CarrierDir: b}
+	cfg.SetExcludes(a, b, []string{"*.tmp"})
+	if err := state.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
+	if out := run(t, "verify", a); !strings.Contains(out, "校验通过") {
+		t.Fatalf("配置了排除规则时 verify 应通过，实际:\n%s", out)
+	}
+
+	run(t, "repair", a, testLBArg, testSBArg)
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
+	if out := run(t, "verify", a); !strings.Contains(out, "校验通过") {
+		t.Fatalf("repair 后再同步，verify 仍应通过，实际:\n%s", out)
+	}
+}
+
+// 新加排除规则后、尚未再同步时，被排除文件残留的索引不应被当成「多余索引」。
+func TestVerifyIgnoresIndexesOfExcludedFiles(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	_, a, b := setup(t)
+	writeFile(t, filepath.Join(a, "keep.txt"), []byte("keep"))
+	writeFile(t, filepath.Join(a, "cache.tmp"), []byte("cached"))
+
+	// 先用无排除规则的配置建立索引（cache.tmp 也会建）
+	run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
+
+	cfg := &state.Config{LocalDir: a, CarrierDir: b}
+	cfg.SetExcludes(a, b, []string{"*.tmp"})
+	if err := state.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if out := run(t, "verify", a); !strings.Contains(out, "校验通过") {
+		t.Fatalf("被排除文件的残留索引不应算多余索引，实际:\n%s", out)
+	}
+}
+
+// 界面依赖的输出契约：确认标记行与汇总行必须能被共享常量/正则识别。
+func TestGUIContract(t *testing.T) {
+	_, a, b := setup(t)
+	writeFile(t, filepath.Join(a, "disk.vmdk"), rnd(120*1024, 51))
+
+	// 首次同步停在确认；无交互输入时退出码非零，标记行必须已经打印
+	out := runExpectFail(t, "sync", a, b, testLBArg, testSBArg)
+	if !strings.Contains(out, mirror.ConfirmMarker) {
+		t.Fatalf("首次同步应打印确认标记行 %q，实际:\n%s", mirror.ConfirmMarker, out)
+	}
+
+	out = run(t, "sync", a, b, "--yes", testLBArg, testSBArg)
+	m := mirror.ResultPattern.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("汇总行应能被 ResultPattern 解析，实际:\n%s", out)
+	}
+	if m[2] != "1" || m[3] != "1" || m[4] != "0" {
+		t.Fatalf("汇总行统计不符：扫描 %s 改动 %s 删除 %s\n%s", m[2], m[3], m[4], out)
+	}
+	if p := mirror.ProgressPattern.FindStringSubmatch(out); p == nil || p[1] != "1" || p[2] != "1" {
+		t.Fatalf("进度行应能被 ProgressPattern 解析，实际:\n%s", out)
 	}
 }
 

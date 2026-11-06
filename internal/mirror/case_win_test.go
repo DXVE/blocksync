@@ -3,10 +3,34 @@
 package mirror
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"blocksync/internal/scan"
 )
+
+// 计划摘要与真正的配对逻辑使用同一个比较键：仅大小写不同应算比对或大小变化，不算新增。
+func TestPlanUsesCaseInsensitivePairing(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(src, "Readme.txt"), []byte("new-content"))
+	write(t, filepath.Join(dst, "readme.txt"), []byte("old-content"))
+
+	var got Plan
+	_, err := Run(Options{
+		Source: src, Target: dst, LB: tLB, SB: tSB,
+		Excludes: scan.DefaultExcludes,
+		Confirm:  func(p Plan) (bool, error) { got = p; return false, nil },
+	})
+	if !errors.Is(err, ErrCancelled) {
+		t.Fatalf("应返回取消，实际 %v", err)
+	}
+	if got.NewFiles != 0 || got.CompareFiles != 1 {
+		t.Fatalf("大小写不同的同名文件应算比对：NewFiles=%d Resized=%d Compare=%d",
+			got.NewFiles, got.ResizedFiles, got.CompareFiles)
+	}
+}
 
 func TestCaseOnlyNameIsNotDeleted(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()

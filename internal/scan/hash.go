@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"os"
+	"runtime"
 	"sync"
 
 	"blocksync/internal/index"
@@ -20,7 +21,6 @@ type Range struct {
 type Result struct {
 	New          *index.File
 	Ranges       []Range
-	ChangedBytes uint64
 	ScannedBytes uint64
 }
 
@@ -33,6 +33,14 @@ type lbHashes struct {
 // ValidateBlocks 校验块参数合法性。
 func ValidateBlocks(lb, sb int64) bool {
 	return lb > 0 && sb > 0 && lb > sb && lb%sb == 0
+}
+
+// Workers 返回并行哈希的线程数：n 非正时取 CPU 核数。
+func Workers(n int) int {
+	if n > 0 {
+		return n
+	}
+	return runtime.NumCPU()
 }
 
 func mapLBs(f *os.File, size, lb, sb int64, workers int, fn func(*lbHashes)) error {
@@ -148,7 +156,6 @@ func ScanFull(p string, lb, sb int64, workers int) (*Result, error) {
 	return &Result{
 		New:          nf,
 		Ranges:       []Range{{Off: 0, Len: uint64(size)}},
-		ChangedBytes: uint64(size),
 		ScannedBytes: uint64(size),
 	}, nil
 }
@@ -235,7 +242,7 @@ func ScanDiff(p string, lb, sb int64, old *index.File, workers int) (*Result, er
 		return nil, err
 	}
 
-	res := &Result{New: nf, ScannedBytes: uint64(size), ChangedBytes: changedBytes}
+	res := &Result{New: nf, ScannedBytes: uint64(size)}
 	if changedBytes == uint64(size) && size > 0 {
 		res.Ranges = []Range{{Off: 0, Len: uint64(size)}}
 		return res, nil

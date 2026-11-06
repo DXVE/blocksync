@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -17,6 +18,16 @@ import (
 )
 
 const copyChunk = 4 << 20
+
+// ConfirmMarker 命令行在等待确认时打印的标记行；界面据此判断需要弹确认框。
+// 两侧共用同一常量，避免一处改字导致确认流程失效。
+const ConfirmMarker = "需要确认后才会开始写入"
+
+// ResultPattern 匹配 sync 结束时的汇总行，供界面提取改动数量与读写量。
+var ResultPattern = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
+
+// ProgressPattern 匹配逐文件进度行 `[已处理/总数] 状态  相对路径`。
+var ProgressPattern = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
 
 // Options 一次同步的参数。
 type Options struct {
@@ -63,16 +74,16 @@ func (p Plan) Summary() string {
 		b.WriteString("  目标目录还没有索引，本次为首次同步\n")
 	}
 	if p.NewFiles > 0 {
-		fmt.Fprintf(&b, "  新增 %d 个文件（约 %s）\n", p.NewFiles, sizeStr(uint64(p.NewBytes)))
+		fmt.Fprintf(&b, "  新增 %d 个文件（约 %s）\n", p.NewFiles, scan.FormatSize(uint64(p.NewBytes)))
 	}
 	if p.ResizedFiles > 0 {
-		fmt.Fprintf(&b, "  大小变化 %d 个文件（共 %s）\n", p.ResizedFiles, sizeStr(uint64(p.ResizedBytes)))
+		fmt.Fprintf(&b, "  大小变化 %d 个文件（共 %s）\n", p.ResizedFiles, scan.FormatSize(uint64(p.ResizedBytes)))
 	}
 	if p.CompareFiles > 0 {
 		fmt.Fprintf(&b, "  需比对 %d 个文件（大小相同，写入量取决于块比对）\n", p.CompareFiles)
 	}
 	if p.DeleteFiles > 0 {
-		fmt.Fprintf(&b, "  删除 %d 个文件（共 %s）\n", p.DeleteFiles, sizeStr(uint64(p.DeleteBytes)))
+		fmt.Fprintf(&b, "  删除 %d 个文件（共 %s）\n", p.DeleteFiles, scan.FormatSize(uint64(p.DeleteBytes)))
 	}
 	return b.String()
 }
@@ -86,13 +97,6 @@ type Report struct {
 	BytesWritten uint64
 	// Skipped 输入目录中按排除规则跳过的条目（目录以 / 结尾）。
 	Skipped []string
-}
-
-func (o *Options) workers() int {
-	if o.Workers > 0 {
-		return o.Workers
-	}
-	return runtime.NumCPU()
 }
 
 // Run 把 Source 目录镜像到 Target 目录。
@@ -154,7 +158,7 @@ func Run(o Options) (*Report, error) {
 			dels = append(dels, f)
 		}
 	}
-	w := o.workers()
+	w := scan.Workers(o.Workers)
 
 	plan := buildPlan(o, srcFiles, dstMap, dels, dstStore)
 	if !o.DryRun {
@@ -283,15 +287,15 @@ func Run(o Options) (*Report, error) {
 			switch {
 			case !dstExists:
 				status = "新增"
-				detail = fmt.Sprintf("（%s）", sizeStr(uint64(f.Size)))
+				detail = fmt.Sprintf("（%s）", scan.FormatSize(uint64(f.Size)))
 			case changedBytes > 0:
 				status = "更新"
-				detail = fmt.Sprintf("变化块 %s（文件共 %s）", sizeStr(changedBytes), sizeStr(uint64(f.Size)))
+				detail = fmt.Sprintf("变化块 %s（文件共 %s）", scan.FormatSize(changedBytes), scan.FormatSize(uint64(f.Size)))
 			case f.Size == 0:
 				status = "清空"
 			default:
 				status = "截断"
-				detail = "截断到 " + sizeStr(uint64(f.Size))
+				detail = "截断到 " + scan.FormatSize(uint64(f.Size))
 			}
 		}
 		fmt.Fprintf(out, "[%d/%d] %s  %s", i+1, total, status, f.Rel)
@@ -513,7 +517,7 @@ func ensureDistinct(srcPath, dstPath string) error {
 func buildPlan(o Options, srcFiles []scan.Entry, dstMap map[string]scan.Entry, dels []scan.Entry, dstStore *index.Store) Plan {
 	p := Plan{Source: o.Source, Target: o.Target}
 	for _, f := range srcFiles {
-		d, ok := dstMap[f.Rel]
+		d, ok := dstMap[scan.PathKey(f.Rel)]
 		switch {
 		case !ok:
 			p.NewFiles++
@@ -550,10 +554,11 @@ func (o *Options) checkMassDelete(deletes, total int) error {
 	return nil
 }
 
+// saveIndex 把索引按给定修改时间落盘。索引对象在本轮文件处理中不再被复用，
+// 因此直接改写时间字段，不再为整份索引额外复制一份。
 func saveIndex(store *index.Store, rel string, f *index.File, mtime int64) error {
-	g := f.Clone()
-	g.MtimeNano = mtime
-	return store.Save(rel, g)
+	f.MtimeNano = mtime
+	return store.Save(rel, f)
 }
 
 // copyRanges 按区间从源文件拷到目标文件，最后截断到源长度并还原修改时间。
@@ -578,11 +583,17 @@ func copyRanges(srcPath, dstPath string, ranges []scan.Range, size int64, mtimeN
 			if n > r.Len-done {
 				n = r.Len - done
 			}
-			if _, err := sf.ReadAt(buf[:n], int64(r.Off+done)); err != nil && !errors.Is(err, io.EOF) {
+			off := int64(r.Off + done)
+			got, err := sf.ReadAt(buf[:n], off)
+			if err != nil {
 				df.Close()
-				return err
+				return fmt.Errorf("读取源文件偏移 %d 失败（文件可能被截短）: %w", off, err)
 			}
-			if _, err := df.WriteAt(buf[:n], int64(r.Off+done)); err != nil {
+			if got != int(n) {
+				df.Close()
+				return fmt.Errorf("读取源文件偏移 %d 只得到 %d 字节，期望 %d（文件可能被截短）", off, got, n)
+			}
+			if _, err := df.WriteAt(buf[:n], off); err != nil {
 				df.Close()
 				return err
 			}
@@ -605,19 +616,4 @@ func copyRanges(srcPath, dstPath string, ranges []scan.Range, size int64, mtimeN
 		_ = os.Chtimes(dstPath, t, t)
 	}
 	return nil
-}
-
-func sizeStr(n uint64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	units := []string{"KiB", "MiB", "GiB", "TiB"}
-	v := float64(n)
-	i := -1
-	for v >= unit && i < len(units)-1 {
-		v /= unit
-		i++
-	}
-	return fmt.Sprintf("%.1f %s", v, units[i])
 }
