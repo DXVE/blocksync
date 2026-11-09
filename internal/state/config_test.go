@@ -2,25 +2,22 @@ package state
 
 import "testing"
 
-// OtherSide 供单目录命令找回目录对的另一侧；具名配置优先，其次生效目录对。
-func TestOtherSide(t *testing.T) {
-	c := &Config{LocalDir: `C:\data\a`, CarrierDir: `E:\backup\a`}
-	if got := c.OtherSide(`c:\DATA\a\`); got != `E:\backup\a` {
-		t.Errorf("生效目录对应返回另一侧，实际 %q", got)
-	}
-	if got := c.OtherSide(`E:\backup\a`); got != `C:\data\a` {
-		t.Errorf("反向也应返回另一侧，实际 %q", got)
-	}
-	if got := c.OtherSide(`D:\other`); got != "" {
-		t.Errorf("未登记的目录应返回空串，实际 %q", got)
-	}
+// ExcludesForDir 让单目录命令按目录取到所属目录对的规则，不依赖配置项是否还在。
+func TestExcludesForDir(t *testing.T) {
+	c := &Config{}
+	c.SetExcludes(`C:\data\a`, `E:\backup\a`, []string{`*.tmp`})
 
-	c.Profiles = []Profile{{Name: "b", LocalDir: `D:\data\b`, CarrierDir: `F:\backup\b`}}
-	if got := c.OtherSide(`F:\backup\b`); got != `D:\data\b` {
-		t.Errorf("具名配置中的目录应返回其配对的另一侧，实际 %q", got)
+	if got := c.ExcludesForDir(`c:\DATA\a\`); len(got) != 1 || got[0] != `*.tmp` {
+		t.Errorf("本地侧应取到规则，实际 %q", got)
 	}
-	if got := (*Config)(nil).OtherSide(`C:\data\a`); got != "" {
-		t.Errorf("空配置应返回空串，实际 %q", got)
+	if got := c.ExcludesForDir(`E:\backup\a`); len(got) != 1 || got[0] != `*.tmp` {
+		t.Errorf("载体侧应取到同一规则，实际 %q", got)
+	}
+	if got := c.ExcludesForDir(`D:\other`); got != nil {
+		t.Errorf("未登记目录应返回 nil，实际 %q", got)
+	}
+	if got := (*Config)(nil).ExcludesForDir(`C:\data\a`); got != nil {
+		t.Errorf("空配置应返回 nil，实际 %q", got)
 	}
 }
 

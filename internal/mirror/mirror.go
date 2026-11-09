@@ -584,14 +584,9 @@ func copyRanges(srcPath, dstPath string, ranges []scan.Range, size int64, mtimeN
 				n = r.Len - done
 			}
 			off := int64(r.Off + done)
-			got, err := sf.ReadAt(buf[:n], off)
-			if err != nil {
+			if _, err := sf.ReadAt(buf[:n], off); err != nil {
 				df.Close()
 				return fmt.Errorf("读取源文件偏移 %d 失败（文件可能被截短）: %w", off, err)
-			}
-			if got != int(n) {
-				df.Close()
-				return fmt.Errorf("读取源文件偏移 %d 只得到 %d 字节，期望 %d（文件可能被截短）", off, got, n)
 			}
 			if _, err := df.WriteAt(buf[:n], off); err != nil {
 				df.Close()

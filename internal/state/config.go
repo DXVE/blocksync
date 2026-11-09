@@ -188,27 +188,18 @@ func (c *Config) EnsureProfile() bool {
 	return false
 }
 
-// OtherSide 返回与 dir 配对的另一侧目录：先查具名配置，再查生效目录对。
-// dir 不属于任何配置时返回空串，供单目录命令取目录对排除规则。
-func (c *Config) OtherSide(dir string) string {
+// ExcludesForDir 返回目录所属目录对的排除规则，供单目录命令取到与 sync 相同的规则。
+// 规则表以目录对为键，不依赖配置项是否仍在；目录不在任何目录对中时返回 nil。
+func (c *Config) ExcludesForDir(dir string) []string {
 	if c == nil || strings.TrimSpace(dir) == "" {
-		return ""
+		return nil
 	}
-	for _, p := range c.Profiles {
-		switch {
-		case SameDir(p.LocalDir, dir):
-			return p.CarrierDir
-		case SameDir(p.CarrierDir, dir):
-			return p.LocalDir
+	for i := range c.ExcludeSets {
+		if SameDir(c.ExcludeSets[i].A, dir) || SameDir(c.ExcludeSets[i].B, dir) {
+			return c.ExcludeSets[i].Excludes
 		}
 	}
-	if SameDir(c.LocalDir, dir) {
-		return c.CarrierDir
-	}
-	if SameDir(c.CarrierDir, dir) {
-		return c.LocalDir
-	}
-	return ""
+	return nil
 }
 
 // SameDir 判断两个目录是否指向同一位置（忽略大小写、尾斜杠与相对写法）。

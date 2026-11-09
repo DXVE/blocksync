@@ -256,30 +256,17 @@ func loadConfigOrWarn() *state.Config {
 }
 
 // loadExcludes 汇总排除规则：内置默认 → 目录对的界面配置。
-// other 为同一次同步的另一侧目录；只有单侧目录时传空串。
+// other 为同一次同步的另一侧目录；单目录命令传空串，按目录在配置里查找目录对。
 func loadExcludes(local, other string) []string {
-	ex := append([]string(nil), scan.DefaultExcludes...)
-	if other == "" {
-		return ex
-	}
-	if cfg := loadConfigOrWarn(); cfg != nil {
-		ex = append(ex, cfg.ExcludesFor(local, other)...)
-	}
-	return ex
-}
-
-// loadExcludesForDir 供单目录命令（repair/verify）使用：从配置查出该目录所属
-// 目录对的另一侧，取到与 sync 相同的排除规则。
-func loadExcludesForDir(dir string) []string {
 	ex := append([]string(nil), scan.DefaultExcludes...)
 	cfg := loadConfigOrWarn()
 	if cfg == nil {
 		return ex
 	}
-	if other := cfg.OtherSide(dir); other != "" {
-		ex = append(ex, cfg.ExcludesFor(dir, other)...)
+	if other == "" {
+		return append(ex, cfg.ExcludesForDir(local)...)
 	}
-	return ex
+	return append(ex, cfg.ExcludesFor(local, other)...)
 }
 
 // warnLegacyExcludes 提示旧版按目录存放的排除文件已停用；只检查存在性，不读取内容。
@@ -335,7 +322,7 @@ func cmdRepair(args []string) error {
 	defer unlock()
 
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludesForDir(local)
+	excludes := loadExcludes(local, "")
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)
@@ -584,7 +571,7 @@ func cmdVerify(args []string) error {
 
 func verifyDir(local string, workers int, quiet bool) error {
 	store := index.NewStore(state.Dir(local))
-	excludes := loadExcludesForDir(local)
+	excludes := loadExcludes(local, "")
 	files, err := scan.Walk(local, excludes)
 	if err != nil {
 		return fmt.Errorf("扫描目录失败: %w", err)
