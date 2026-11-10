@@ -803,9 +803,13 @@ func splitExcludeLines(text string) []string {
 	return out
 }
 
-// validateExcludeText 校验每行规则的写法，返回第一条错误。
+// validateExcludeText 校验每行规则的写法，返回第一条错误；行号按编辑框原始行计，空行占位。
 func validateExcludeText(text string) error {
-	for i, line := range splitExcludeLines(text) {
+	for i, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		if err := scan.ValidatePattern(line); err != nil {
 			return fmt.Errorf("第 %d 行“%s”不是有效规则：%v", i+1, line, err)
 		}
