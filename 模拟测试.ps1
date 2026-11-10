@@ -14,14 +14,18 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } c
 $exe = Join-Path $PSScriptRoot 'dist\BlockSync-CLI.exe'
 if (-not (Test-Path $exe)) { throw "找不到 $exe" }
 
-$A = Join-Path $Root 'A'   # 模拟本机源目录
-$D = Join-Path $Root 'D'   # 模拟移动硬盘
-$B = Join-Path $Root 'B'   # 模拟另一端
-
 if (Test-Path $Root) {
     if ($Root -notlike '*blocksync-rehearsal*') { throw "拒绝清理非演练目录: $Root" }
     Remove-Item $Root -Recurse -Force
 }
+New-Item -ItemType Directory -Path $Root -Force | Out-Null
+# 归一化为长路径：Get-ChildItem 返回子项长路径，根目录为 8.3 短路径时按长度截取相对路径会错位
+$Root = (Get-Item -LiteralPath $Root).FullName.TrimEnd('\', '/')
+
+$A = Join-Path $Root 'A'   # 模拟本机源目录
+$D = Join-Path $Root 'D'   # 模拟移动硬盘
+$B = Join-Path $Root 'B'   # 模拟另一端
+
 foreach ($p in @($A, $D, $B)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 
 $script:failed = 0

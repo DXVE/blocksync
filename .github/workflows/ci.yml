@@ -1,0 +1,28 @@
+# 作用：日常 push 与 PR 时跑全部 Go 测试，把合入问题挡在发版之前；关键机制为只跑 go test，GUI 使用 Win32 调用且端到端测试以子进程运行 exe，因此必须用 Windows runner。
+name: CI
+
+on:
+  push:
+    # v* tag 由 release.yml 负责测试与发版，这里跳过避免同一提交重复测试
+    tags-ignore:
+      - 'v*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 单元与端到端测试
+        # e2e_test.go 会在临时目录现场编译 CLI 并以子进程执行完整命令集
+        run: go test ./...
