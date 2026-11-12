@@ -136,7 +136,7 @@ try {
 $after = (Get-Item -LiteralPath $Path)
 Write-Host ""
 if ([int64]$after.Length -ne $size) {
-    Write-Host ("警告：文件长度发生变化 {0:N0} -> {1:N0}" -f $size, $after.Length) -ForegroundColor Red
+    Write-Host ("前提不满足：写入后文件长度变化 {0:N0} -> {1:N0}（可能有其他程序同时写入该文件）" -f $size, $after.Length) -ForegroundColor Yellow
 } else {
     Write-Host ("已写入，长度未变（{0:N0} 字节）" -f $after.Length) -ForegroundColor Green
 }

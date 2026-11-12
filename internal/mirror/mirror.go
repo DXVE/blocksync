@@ -184,7 +184,7 @@ func Run(o Options) (*Report, error) {
 
 		srcIdx, err := srcStore.Load(f.Rel)
 		if err != nil {
-			fmt.Fprintf(out, "  警告: %s 源索引损坏，将重建\n", f.Rel)
+			fmt.Fprintf(out, "  提示：%s 的索引损坏，将自动重扫（不影响同步）\n", f.Rel)
 			srcIdx = nil
 		}
 		dstIdx, err := dstStore.Load(f.Rel)

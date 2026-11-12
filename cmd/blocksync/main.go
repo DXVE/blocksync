@@ -596,7 +596,7 @@ func verifyDir(local string, workers int, quiet bool) error {
 		}
 		res, err := scan.ScanFull(abs, int64(old.LB), int64(old.SB), w)
 		if err != nil {
-			fmt.Printf("扫描失败  %s: %v\n", f.Rel, err)
+			fmt.Printf("无法读取  %s: %v\n", f.Rel, err)
 			bad++
 			continue
 		}
