@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"blocksync/internal/mirror"
@@ -323,6 +324,7 @@ var (
 	readerDone bool
 	running    bool
 	cancelled  bool
+	runStart   time.Time
 	proc       *exec.Cmd
 	logChars   int
 	runLog     []string // 本次运行的全部输出行（仅界面线程读写），结束判定不能只看最后一批
@@ -612,6 +614,7 @@ func startRun(dry, verify, full, force, allowMass bool) {
 	finished, exitCode = false, 0
 	procExited, readerDone = false, false
 	cancelled = false
+	runStart = time.Now()
 	mu.Unlock()
 	// 先把上一次运行遗留的行写入，再插入分隔行，保证先后顺序
 	flushPendingLog()
@@ -1331,6 +1334,7 @@ func flushUI() {
 	cur, total, known := progCur, progTotal, progKnown
 	fin, code := finished, exitCode
 	wasCancelled := cancelled
+	start := runStart
 	mu.Unlock()
 
 	appendLogText(lines)
@@ -1355,21 +1359,22 @@ func flushUI() {
 		}
 		pSendMessageW.Call(uintptr(hProgress), pbmSetPos, done, 0)
 		joined := strings.Join(runLog, "\n")
+		elapsed := time.Since(start).Round(time.Millisecond)
 		if wasCancelled {
 			setText(hStatus, "已取消，未写入任何文件")
 		} else if code == 0 {
 			if m := mirror.ResultPattern.FindStringSubmatch(joined); m != nil {
 				if m[1] != "" {
-					setText(hStatus, fmt.Sprintf("测试比对：需改动 %s 个文件、删除 %s 个；读取 %s，预计需写入 %s（未改动数据）", m[3], m[4], m[5], m[6]))
+					setText(hStatus, fmt.Sprintf("测试比对：需改动 %s 个文件、删除 %s 个；读取 %s，预计需写入 %s（未改动数据），耗时 %s", m[3], m[4], m[5], m[6], elapsed))
 				} else {
-					setText(hStatus, fmt.Sprintf("完成：改动 %s 个文件、删除 %s 个；读取 %s，写入 %s", m[3], m[4], m[5], m[6]))
+					setText(hStatus, fmt.Sprintf("完成：改动 %s 个文件、删除 %s 个；读取 %s，写入 %s，耗时 %s", m[3], m[4], m[5], m[6], elapsed))
 				}
 			} else if strings.Contains(joined, "未改动任何数据") {
-				setText(hStatus, "测试比对：没有需要搬运的内容")
+				setText(hStatus, fmt.Sprintf("测试比对：没有需要搬运的内容，耗时 %s", elapsed))
 			} else if strings.Contains(joined, "已是最新") {
-				setText(hStatus, "已是最新，没有需要搬运的内容")
+				setText(hStatus, fmt.Sprintf("已是最新，没有需要搬运的内容，耗时 %s", elapsed))
 			} else {
-				setText(hStatus, "完成")
+				setText(hStatus, fmt.Sprintf("完成，耗时 %s", elapsed))
 			}
 		} else {
 			if hint := massDeleteHint(joined); hint != "" && !lastMass {
@@ -1399,7 +1404,7 @@ func flushUI() {
 					return
 				}
 			}
-			setText(hStatus, fmt.Sprintf("失败（退出码 %d），详见下面的日志", code))
+			setText(hStatus, fmt.Sprintf("失败（退出码 %d），耗时 %s，详见下面的日志", code, elapsed))
 		}
 	}
 }

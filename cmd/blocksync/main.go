@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"blocksync/internal/index"
 	"blocksync/internal/mirror"
@@ -429,6 +430,7 @@ func cmdSync(args []string) error {
 	if !*yes {
 		confirm = askPlan
 	}
+	start := time.Now()
 	rep, err := mirror.Run(mirror.Options{
 		Source:          src,
 		Target:          dst,
@@ -446,26 +448,27 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
+	elapsed := time.Since(start).Round(time.Millisecond)
 	if len(rep.Skipped) > 0 {
 		fmt.Printf("按排除规则跳过 %d 项：%s\n", len(rep.Skipped), skippedLine(rep.Skipped))
 	}
 	if rep.FilesChanged == 0 && rep.FilesDeleted == 0 {
 		if *dry {
-			fmt.Printf("测试比对：%d 个文件均无变化，未改动任何数据\n", rep.FilesScanned)
+			fmt.Printf("测试比对：%d 个文件均无变化，未改动任何数据，耗时 %s\n", rep.FilesScanned, elapsed)
 		} else {
-			fmt.Printf("已是最新：%d 个文件均无变化\n", rep.FilesScanned)
+			fmt.Printf("已是最新：%d 个文件均无变化，耗时 %s\n", rep.FilesScanned, elapsed)
 		}
 		return nil
 	}
 	if *dry {
-		fmt.Printf("\n完成（测试比对）：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，预计需写入 %s（未改动任何数据）\n",
+		fmt.Printf("\n完成（测试比对）：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，预计需写入 %s（未改动任何数据），耗时 %s\n",
 			rep.FilesScanned, rep.FilesChanged, rep.FilesDeleted,
-			scan.FormatSize(rep.BytesRead), scan.FormatSize(rep.BytesWritten))
+			scan.FormatSize(rep.BytesRead), scan.FormatSize(rep.BytesWritten), elapsed)
 		return nil
 	}
-	fmt.Printf("\n完成：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，写入 %s\n",
+	fmt.Printf("\n完成：扫描 %d 个，改动 %d 个，删除 %d 个；读取 %s，写入 %s，耗时 %s\n",
 		rep.FilesScanned, rep.FilesChanged, rep.FilesDeleted,
-		scan.FormatSize(rep.BytesRead), scan.FormatSize(rep.BytesWritten))
+		scan.FormatSize(rep.BytesRead), scan.FormatSize(rep.BytesWritten), elapsed)
 	return nil
 }
 

@@ -1,4 +1,4 @@
-# BlockSync
+# BlockSync —— 基于文件变化块的增量同步工具
 
 针对大文件的块级增量同步工具：把一个目录增量镜像到另一个目录时，**只写入发生变化的块**，而不是整个文件全量复制。
 
@@ -7,9 +7,15 @@
 常规同步工具以文件为最小单位，改一点也要重传整个文件。
 BlockSync 把文件切成 32 KiB 的块并记录 SHA-256，按块比较差异，一次同步只搬运变化的部分。对大文件反复小幅修改的场景（虚拟机磁盘、数据库文件、磁盘镜像、视频工程），写入量可以下降一到两个数量级。
 
-![同步运行中：逐文件报告状态与变化块写入量](blocksync-ui.png)
+<p align="center">
+  <img src="blocksync-cli.png" width="900" alt="命令行同步：逐文件状态与变化块写入量"><br>
+  <sub><em style="color:#888">命令行界面</em></sub>
+</p>
 
-![同步完成：逐文件变化块与合计读写量](blocksync-ui-done.png)
+<p align="center">
+  <img src="blocksync-ui.png" width="900" alt="图形界面同步：逐文件变化块与合计读写量"><br>
+  <sub><em style="color:#888">图形界面</em></sub>
+</p>
 
 ## 功能特性
 

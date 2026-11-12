@@ -8,6 +8,9 @@
 # 构建时嵌入界面程序的命令行副本（由 build.cmd 生成）
 /cmd/blocksync-ui/embedded/
 
+# 本机专用脚本
+/local/
+
 # blocksync 运行期状态与中间文件
 .blocksync/
 *.idx
