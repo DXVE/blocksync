@@ -1,4 +1,4 @@
-# 作用：推送 v* tag 时跑测试、编译 CLI 与内嵌 CLI 的 GUI，并把两个 exe 上传到同名 Release；关键机制为版本号取自 internal/version 并先于测试核对，且 GUI 需 embedcli 标签编入 CLI 字节。
+# 作用：推送 v* tag 时在一个 job 内依次校验版本、跑测试、编译 CLI 与内嵌 CLI 的 GUI，并把两个 exe 上传到同名 Release；关键机制为版本号取自 internal/version 并先于测试核对，且 GUI 需 embedcli 标签编入 CLI 字节。
 name: Release
 
 on:
@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  version:
-    # 版本号只是源码里的常量，不装 Go、不编译：tag 写错时十几秒内失败，不必白等编译与测试
+  release:
+    # 全部步骤串行放在同一 job：避免每个阶段重新申请 runner、重复 checkout 与安装 Go
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -34,13 +34,6 @@ jobs:
           }
           Write-Host "版本一致：$declared"
 
-  test:
-    needs: version
-    # GUI 使用 Win32 调用，端到端测试以子进程运行 exe，只能在 Windows 上验证
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
       - name: 安装 Go
         uses: actions/setup-go@v7
         with:
@@ -50,18 +43,6 @@ jobs:
       - name: 单元与端到端测试
         # e2e_test.go 会在临时目录现场编译 CLI 并以子进程执行完整命令集
         run: go test ./...
-
-  release:
-    needs: test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: 安装 Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
 
       - name: 编译命令行主程序
         # 产物与 build.cmd 一致：去符号表、去调试信息，体积更小
