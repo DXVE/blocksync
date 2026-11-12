@@ -147,6 +147,16 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File 模拟测试.ps1 -FileMB 64 -FileCount 3 -ChangeMB 8
 
+      - name: 重命名产物为带版本号的发布名
+        # 资产名带 tag，便于区分版本；校验与演练仍用未改名的 dist 路径
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        shell: pwsh
+        run: |
+          foreach ($name in @('BlockSync-CLI', 'BlockSync-GUI')) {
+            Move-Item -LiteralPath "dist\$name.exe" -Destination "dist\${name}-$env:TAG_NAME.exe"
+          }
+
       - name: 清理同名 tag 的旧 release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
