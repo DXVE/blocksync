@@ -1359,7 +1359,7 @@ func flushUI() {
 		}
 		pSendMessageW.Call(uintptr(hProgress), pbmSetPos, done, 0)
 		joined := strings.Join(runLog, "\n")
-		elapsed := time.Since(start).Round(time.Millisecond)
+		elapsed := time.Since(start).Truncate(time.Second)
 		if wasCancelled {
 			setText(hStatus, "已取消，未写入任何文件")
 		} else if code == 0 {

@@ -448,7 +448,7 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
-	elapsed := time.Since(start).Round(time.Millisecond)
+	elapsed := time.Since(start).Truncate(time.Second)
 	if len(rep.Skipped) > 0 {
 		fmt.Printf("按排除规则跳过 %d 项：%s\n", len(rep.Skipped), skippedLine(rep.Skipped))
 	}

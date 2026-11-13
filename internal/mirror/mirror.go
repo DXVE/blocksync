@@ -177,6 +177,12 @@ func Run(o Options) (*Report, error) {
 	}
 
 	total := len(srcFiles) + len(dels)
+	// 首个文件可能长时间无输出，先报一行，避免被误认为卡死
+	if o.DryRun {
+		fmt.Fprintln(out, "测试比对开始…")
+	} else {
+		fmt.Fprintln(out, "同步任务开始…")
+	}
 	for i, f := range srcFiles {
 		rep.FilesScanned++
 		absSrcFile := filepath.Join(o.Source, filepath.FromSlash(f.Rel))
