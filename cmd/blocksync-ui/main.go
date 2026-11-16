@@ -145,8 +145,9 @@ const (
 	idYes         = 6
 	mbDefButton2  = 0x00000100
 
-	mfString = 0x00000000
-	mfPopup  = 0x00000010
+	mfString    = 0x00000000
+	mfPopup     = 0x00000010
+	mfSeparator = 0x00000800
 
 	swShow = 5
 
@@ -274,23 +275,24 @@ type appliedProfile struct {
 }
 
 const (
-	idEditSrc = 1001
-	idEditDst = 1002
-	idBSrc    = 1003
-	idBDst    = 1004
-	idChkVer  = 1005
-	idChkFull = 1006
-	idSync    = 1007
-	idDry     = 1008
-	idCancel  = 1009
-	idOpen    = 1011
-	idStatus  = 1012
-	idProg    = 1013
-	idLog     = 1014
-	idSwap    = 1015
-	idOpenSrc = 1016
-	idCfgMgr  = 1018
-	timerID   = 1
+	idEditSrc  = 1001
+	idEditDst  = 1002
+	idBSrc     = 1003
+	idBDst     = 1004
+	idChkVer   = 1005
+	idChkFull  = 1006
+	idSync     = 1007
+	idDry      = 1008
+	idCancel   = 1009
+	idOpen     = 1011
+	idStatus   = 1012
+	idProg     = 1013
+	idLog      = 1014
+	idSwap     = 1015
+	idOpenSrc  = 1016
+	idCfgMgr   = 1018
+	idOpenLogs = 1019
+	timerID    = 1
 
 	idCfgList      = 3001
 	idCfgName      = 3002
@@ -1202,6 +1204,8 @@ func buildMenu() syscall.Handle {
 	dir, _, _ := pCreatePopupMenu.Call()
 	pAppendMenuW.Call(dir, mfString, idOpenSrc, uintptr(unsafe.Pointer(u16("打开原目录"))))
 	pAppendMenuW.Call(dir, mfString, idOpen, uintptr(unsafe.Pointer(u16("打开输出目录"))))
+	pAppendMenuW.Call(dir, mfSeparator, 0, 0)
+	pAppendMenuW.Call(dir, mfString, idOpenLogs, uintptr(unsafe.Pointer(u16("打开日志目录"))))
 	pAppendMenuW.Call(menu, mfPopup, dir, uintptr(unsafe.Pointer(u16("目录"))))
 
 	return syscall.Handle(menu)
@@ -1214,6 +1218,20 @@ func openFolder(path string) {
 	}
 	pShellExecuteW.Call(0, uintptr(unsafe.Pointer(u16("open"))),
 		uintptr(unsafe.Pointer(u16(path))), 0, 0, swShow)
+}
+
+// openLogDir 打开本机日志目录；目录尚不存在时先创建。
+func openLogDir() {
+	dir, err := state.LogsDir()
+	if err != nil {
+		msgBox("无法确定日志目录："+err.Error(), mbOk|mbIconError)
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		msgBox("日志目录不可用："+err.Error(), mbOk|mbIconError)
+		return
+	}
+	openFolder(dir)
 }
 
 // ---------- 排除规则文本 ----------
@@ -1960,6 +1978,8 @@ func wndProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
 			openFolder(strings.TrimSpace(getText(hEditDst)))
 		case idOpenSrc:
 			openFolder(strings.TrimSpace(getText(hEditSrc)))
+		case idOpenLogs:
+			openLogDir()
 		}
 		return 0
 

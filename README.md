@@ -8,12 +8,12 @@
 BlockSync 把文件切成 32 KiB 的块并记录 SHA-256，按块比较差异，一次同步只搬运变化的部分。对大文件反复小幅修改的场景（虚拟机磁盘、数据库文件、磁盘镜像、视频工程），写入量可以下降一到两个数量级。
 
 <p align="center">
-  <img src="blocksync-cli.png" width="900" alt="命令行同步：逐文件状态与变化块写入量"><br>
+  <img src="blocksync-cli.png" width="1000" alt="命令行同步：逐文件状态、变化块写入量与完成标记"><br>
   <sub><em style="color:#888">命令行界面</em></sub>
 </p>
 
 <p align="center">
-  <img src="blocksync-ui.png" width="900" alt="图形界面同步：逐文件变化块与合计读写量"><br>
+  <img src="blocksync-ui.png" width="1000" alt="图形界面同步：表格化日志（序号/状态/文件/变化量/完成）与合计读写量"><br>
   <sub><em style="color:#888">图形界面</em></sub>
 </p>
 
