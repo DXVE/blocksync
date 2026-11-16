@@ -327,7 +327,7 @@ var (
 	logColWidth                   int     // 文件列可用像素宽度
 
 	mu         sync.Mutex
-	logQueue   []string
+	logQueue   []logEvent
 	progCur    int
 	progTotal  int
 	progKnown  bool
@@ -617,10 +617,18 @@ func (m *logModel) text() string {
 	return strings.Join(m.lines, "\r\n") + "\r\n"
 }
 
+// logEvent 一条待写入日志区的动作：追加新行，或覆盖最后一行（补完成列）。
+type logEvent struct {
+	text    string
+	replace bool
+}
+
 func appendLog(lines ...string) {
 	mu.Lock()
 	logSink.write(lines...)
-	logQueue = append(logQueue, lines...)
+	for _, l := range lines {
+		logQueue = append(logQueue, logEvent{text: l})
+	}
 	mu.Unlock()
 }
 
@@ -643,6 +651,51 @@ func rebuildLog() {
 	end := logLen()
 	pSendMessageW.Call(uintptr(hLog), emSetSel, end, end)
 	pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
+}
+
+// appendLogEvents 按顺序写入一批日志动作：replace 覆盖界面最后一行，用于补完成列。
+func appendLogEvents(events []logEvent) {
+	var batch []string
+	for _, ev := range events {
+		if !ev.replace {
+			batch = append(batch, ev.text)
+			continue
+		}
+		appendLogText(batch)
+		batch = nil
+		replaceLastLogLine(ev.text)
+	}
+	appendLogText(batch)
+}
+
+// replaceLastLogLine 用新文本覆盖日志区最后一行，模型与控件同步更新。
+// 最后一行一定在控件末尾，起点按该行字符数（含行尾换行）从尾部倒推，
+// 与 rebuildLog 使用同一个字符计数单位。仅在界面线程调用。
+func replaceLastLogLine(line string) {
+	if len(logView.lines) == 0 {
+		appendLogText([]string{line})
+		return
+	}
+	old := logView.lines[len(logView.lines)-1]
+	logView.lines[len(logView.lines)-1] = line
+	logView.chars += lineChars(line) - lineChars(old)
+	if n := len(runLog); n > 0 {
+		runLog[n-1] = line
+	}
+	end, want := logLen(), uintptr(lineChars(old))
+	if end < want {
+		// 控件内容比模型短，说明与模型失步，按模型整体重建
+		rebuildLog()
+		return
+	}
+	start := end - want
+	pSendMessageW.Call(uintptr(hLog), emSetSel, start, start+uintptr(utf16Len(old)))
+	pSendMessageW.Call(uintptr(hLog), emReplaceSel, 0, uintptr(unsafe.Pointer(u16(line))))
+	pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
+
+	if uintptr(logView.chars) != logLen() {
+		rebuildLog()
+	}
 }
 
 // appendLogText 把一组行追加到日志区末尾；仅在界面线程调用。
@@ -859,41 +912,49 @@ func setupLogColumns() {
 // logDisplayLine 只把一行放进界面队列，不写日志文件。
 func logDisplayLine(line string) {
 	mu.Lock()
-	logQueue = append(logQueue, line)
+	logQueue = append(logQueue, logEvent{text: line})
 	mu.Unlock()
 }
 
-// logTable 把逐文件原始行折叠成表格行：进度行先缓存，完成行到达后合并成一行输出，
-// 因此日志区只会出现「已处理完」的记录，不存在半行或顺序错位。
+// logDisplayReplace 把一行放进界面队列，覆盖界面最后一行。
+func logDisplayReplace(line string) {
+	mu.Lock()
+	logQueue = append(logQueue, logEvent{text: line, replace: true})
+	mu.Unlock()
+}
+
+// rowSink 接收折叠后的表格行：append 追加新行，replace 覆盖界面最后一行补完成列。
+type rowSink struct {
+	append  func(string)
+	replace func(string)
+}
+
+// logTable 把 CLI 的逐文件行折叠成界面里的一行：结果行到达就立即显示，
+// 同序号的完成行随后覆盖这一行补上完成列，因此同一文件只占一行。
 type logTable struct {
-	pending *tableRow
+	cur *tableRow // 当前可补完成列的行；nil 表示最后一行已完结或不是逐文件行
 }
 
-// start 缓存一条进度行；上一条若迟迟没有完成行，先按未完成输出。
-func (t *logTable) start(row tableRow, emit func(string)) {
-	t.flush(emit, false)
+// start 处理一条未完成的逐文件行：立即追加显示，并记为可补完成列的行。
+func (t *logTable) start(row tableRow, sink rowSink) {
 	cp := row
-	t.pending = &cp
+	t.cur = &cp
+	sink.append(formatTableRow(row, fitPath(row.path, logColWidth, textWidth), false))
 }
 
-// finish 处理完成行：序号一致时与缓存行合并，否则原样输出这一行。
-func (t *logTable) finish(idx, raw string, emit func(string)) {
-	if t.pending != nil && t.pending.idx == idx {
-		t.flush(emit, true)
+// finish 处理完成行：序号一致时覆盖成带完成列的行，否则原样追加。
+func (t *logTable) finish(idx, raw string, sink rowSink) {
+	if t.cur == nil || t.cur.idx != idx {
+		sink.append(raw)
 		return
 	}
-	emit(raw)
+	row := *t.cur
+	t.cur = nil
+	sink.replace(formatTableRow(row, fitPath(row.path, logColWidth, textWidth), true))
 }
 
-// flush 输出缓存行；done 决定是否补完成列。
-func (t *logTable) flush(emit func(string), done bool) {
-	if t.pending == nil {
-		return
-	}
-	row := *t.pending
-	t.pending = nil
-	emit(formatTableRow(row, fitPath(row.path, logColWidth, textWidth), done))
-}
+// close 结束当前行：其后到达的不再是逐文件行，不能再覆盖它。
+func (t *logTable) close() { t.cur = nil }
 
 // progressOf 从逐文件行里取进度；完成行与进度行同号，不算进度。
 func progressOf(line string) (cur, total int, ok bool) {
@@ -961,10 +1022,10 @@ func runOptions(verify, full, force, allowMass bool) string {
 // flushPendingLog 立即写入队列中已有的行；仅在界面线程调用。
 func flushPendingLog() {
 	mu.Lock()
-	lines := logQueue
+	events := logQueue
 	logQueue = nil
 	mu.Unlock()
-	appendLogText(lines)
+	appendLogEvents(events)
 }
 
 // lockExists 只检查目录锁是否存在，不读取内容。
@@ -1032,11 +1093,13 @@ func startRun(dry, verify, full, force, allowMass bool) {
 	// 日志文件里记下本次运行的边界，事后可按运行定位
 	appendLogFile(fmt.Sprintf("===== %s  %s  %s -> %s%s =====", time.Now().Format("2006-01-02 15:04:05"), runVerb(dry), src, dst, runOptions(verify, full, force, allowMass)))
 	if logLen() > 0 {
-		if dry {
-			appendLog("", "----- 测试比对 -----")
-		} else {
-			appendLog("", "----- 同步 -----")
-		}
+		appendLog("")
+	}
+	// 每次运行都以分隔行开头，长日志里便于区分各轮操作
+	if dry {
+		appendLog("----- 测试比对 -----")
+	} else {
+		appendLog("----- 同步 -----")
 	}
 	if dry {
 		for _, d := range []string{src, dst} {
@@ -1089,14 +1152,15 @@ func startRun(dry, verify, full, force, allowMass bool) {
 		defer r.Close()
 		var recent []string
 		var table logTable
+		sink := rowSink{append: logDisplayLine, replace: logDisplayReplace}
 		onLine := func(line string) {
 			if row, ok := parseTableRow(line); ok {
 				// 日志文件保留 CLI 原始行，界面才做表格化
 				appendLogFile(line)
 				if row.done {
-					table.finish(row.idx, line, logDisplayLine)
+					table.finish(row.idx, line, sink)
 				} else {
-					table.start(row, logDisplayLine)
+					table.start(row, sink)
 					if c, t, ok := progressOf(line); ok {
 						mu.Lock()
 						progCur, progTotal, progKnown = c, t, true
@@ -1104,7 +1168,7 @@ func startRun(dry, verify, full, force, allowMass bool) {
 					}
 				}
 			} else {
-				table.flush(logDisplayLine, false)
+				table.close()
 				appendLog(line)
 			}
 			if strings.Contains(line, "已取消") {
@@ -1133,8 +1197,8 @@ func startRun(dry, verify, full, force, allowMass bool) {
 			}
 		}
 		err := readLogStream(r, onLine)
-		// 进程被中止或中途失败时，最后一条记录也要显示出来（完成列留空）
-		table.flush(logDisplayLine, false)
+		// 进程被中止或中途失败时，最后一行已随到达即显示（完成列留空）
+		table.close()
 		if err != nil {
 			// 不再静默结束：读取中断必须留下痕迹，否则错误行会凭空消失
 			appendLog(fmt.Sprintf("提示：读取主程序输出中断（%v），其后的输出可能缺失", err))
@@ -1771,7 +1835,7 @@ func buildConfigTemplate() []byte {
 
 func flushUI() {
 	mu.Lock()
-	lines := logQueue
+	events := logQueue
 	logQueue = nil
 	cur, total, known := progCur, progTotal, progKnown
 	fin, code := finished, exitCode
@@ -1779,7 +1843,7 @@ func flushUI() {
 	start := runStart
 	mu.Unlock()
 
-	appendLogText(lines)
+	appendLogEvents(events)
 
 	if known && total > 0 && running {
 		pSendMessageW.Call(uintptr(hProgress), pbmSetMarquee, 0, 0)

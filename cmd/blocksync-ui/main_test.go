@@ -366,32 +366,101 @@ func TestLogTabColumnsAlign(t *testing.T) {
 	}
 }
 
-// 进度行在完成行到达前不输出；完成行到达后合并成一行；中止时输出不带完成列的行。
-func TestLogTablePairsDoneLine(t *testing.T) {
+// 结果行立即显示，随后同号完成行覆盖这一行补上完成列；孤立完成行原样追加。
+func TestLogTableAppendsThenCompletes(t *testing.T) {
 	var got []string
-	emit := func(s string) { got = append(got, s) }
+	sink := rowSink{
+		append:  func(s string) { got = append(got, "A "+s) },
+		replace: func(s string) { got = append(got, "R "+s) },
+	}
 	var table logTable
 
 	r1, _ := parseTableRow("[1/2] 更新  a.vmdk  变化块 1.0 MiB（文件共 2.0 MiB）")
-	table.start(r1, emit)
-	if len(got) != 0 {
-		t.Fatalf("完成行到达前不应输出，实际 %q", got)
-	}
-	table.finish("[1/2]", "[1/2] 完成  a.vmdk", emit)
-	if len(got) != 1 || !strings.HasPrefix(got[0], "[1/2]\t更新\ta.vmdk\t1.0 MiB / 2.0 MiB") || !strings.HasSuffix(got[0], "\t完成") {
-		t.Fatalf("应输出带完成列的合并行，实际 %q", got)
+	table.start(r1, sink)
+	if len(got) != 1 || got[0] != "A [1/2]	更新	a.vmdk	1.0 MiB / 2.0 MiB" {
+		t.Fatalf("结果行应立即显示且不带完成列，实际 %q", got)
 	}
 
+	table.finish("[1/2]", "[1/2] 完成  a.vmdk", sink)
+	if want := "R [1/2]	更新	a.vmdk	1.0 MiB / 2.0 MiB	完成"; len(got) != 2 || got[1] != want {
+		t.Fatalf("完成行应覆盖同一行并补完成列，期望 %q，实际 %q", want, got)
+	}
+
+	// 已完结的行不再被覆盖：后面的行一律追加
 	r2, _ := parseTableRow("[2/2] 无变化  b.log")
-	table.start(r2, emit)
-	table.flush(emit, false)
-	if len(got) != 2 || strings.HasSuffix(got[1], "完成") {
-		t.Fatalf("中止时应输出不带完成列的行，实际 %q", got)
+	table.start(r2, sink)
+	if len(got) != 3 || !strings.HasPrefix(got[2], "A [2/2]	无变化	b.log") {
+		t.Fatalf("新行应追加，实际 %q", got)
 	}
 
-	// 没有对应缓存行的完成行按原样输出，不影响后续
-	table.finish("[9/9]", "[9/9] 完成  x", emit)
-	if len(got) != 3 || got[2] != "[9/9] 完成  x" {
-		t.Fatalf("孤立完成行应原样输出，实际 %q", got)
+	// 被普通行打断（close）后，即使序号相同也不再覆盖
+	table.close()
+	table.start(r2, sink)
+	if len(got) != 4 || !strings.HasPrefix(got[3], "A ") {
+		t.Fatalf("普通行之后应重新追加，实际 %q", got)
+	}
+
+	table.finish("[9/9]", "[9/9] 完成  x", sink)
+	if len(got) != 5 || got[4] != "A [9/9] 完成  x" {
+		t.Fatalf("孤立完成行应原样追加，实际 %q", got)
+	}
+}
+
+// 原地刷新只改动最后一行：前置行保留，模型字符数与控件一致。
+func TestReplaceLastLogLineOverwritesTail(t *testing.T) {
+	logEdit, cleanup := newTestLogEdit(t)
+	defer cleanup()
+
+	appendLogText([]string{"表头", "[1/2]\t更新\ta.vmdk\t1.0 MiB / 2.0 GiB"})
+	replaceLastLogLine("[1/2]\t更新\ta.vmdk\t1.5 MiB / 4.0 GiB")
+	replaceLastLogLine("[1/2]\t更新\ta.vmdk\t1.0 MiB / 2.0 GiB\t完成")
+
+	got := getText(logEdit)
+	want := "表头\r\n[1/2]\t更新\ta.vmdk\t1.0 MiB / 2.0 GiB\t完成\r\n"
+	if got != want {
+		t.Fatalf("末尾行应被覆盖，实际:\n%q", got)
+	}
+	if uintptr(logView.chars) != logLen() {
+		t.Fatalf("模型字符数 %d 与控件字符数 %d 不一致", logView.chars, logLen())
+	}
+}
+
+// 端到端：结果行到达即显示，完成行到达后同一文件在日志区仍只占一行。
+func TestLogQueueShowsRowThenCompletes(t *testing.T) {
+	_, cleanup := newTestLogEdit(t)
+	defer cleanup()
+
+	mu.Lock()
+	logQueue = nil
+	mu.Unlock()
+	appendLogText([]string{"同步任务开始…"})
+
+	var table logTable
+	sink := rowSink{append: logDisplayLine, replace: logDisplayReplace}
+	step := func(line string) {
+		row, ok := parseTableRow(line)
+		if !ok {
+			t.Fatalf("应解析为逐文件行: %s", line)
+		}
+		if row.done {
+			table.finish(row.idx, line, sink)
+		} else {
+			table.start(row, sink)
+		}
+		flushPendingLog()
+	}
+
+	step("[1/2] 更新  a.vmdk  变化块 6.0 MiB（文件共 240.0 MiB）（源文件修改时间变化）")
+	if want := "同步任务开始…\r\n[1/2]\t更新\ta.vmdk\t6.0 MiB / 240.0 MiB\r\n"; getText(hLog) != want {
+		t.Fatalf("结果行应在完成前就显示，实际:\n%q", getText(hLog))
+	}
+
+	step("[1/2] 完成  a.vmdk")
+	want := "同步任务开始…\r\n[1/2]\t更新\ta.vmdk\t6.0 MiB / 240.0 MiB\t完成\r\n"
+	if got := getText(hLog); got != want {
+		t.Fatalf("完成列应补在同一行上，实际:\n%q", got)
+	}
+	if uintptr(logView.chars) != logLen() {
+		t.Fatalf("模型字符数 %d 与控件字符数 %d 不一致", logView.chars, logLen())
 	}
 }
