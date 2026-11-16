@@ -51,6 +51,7 @@ const usageText = `blocksync ` + version.Version + ` —— 大目录/大文件�
   --force       忽略上次异常退出遗留的目录锁
   --yes         跳过首次同步与删除前的确认（供脚本调用）
   --allow-mass-delete  删除数量超过安全上限时仍继续（确认无误再用）
+  --log-file P  把本次的全部输出（含进度与错误）另写一份到文件 P
 
 源目录保护: 输入目录与输出目录相同、或互相包含时直接拒绝；每次写入与删除
 都会复核路径，确保不落在输入目录内。首次同步或需要删除文件时，会先列出计划
@@ -58,38 +59,87 @@ const usageText = `blocksync ` + version.Version + ` —— 大目录/大文件�
 `
 
 func main() {
-	if len(os.Args) < 2 {
+	os.Exit(runCLI(os.Args[1:]))
+}
+
+// runCLI 执行一次命令行调用并返回退出码。
+// --log-file 在这里统一接管标准输出与标准错误，子命令无需关心日志去向。
+func runCLI(args []string) int {
+	rest, logPath, err := takeLogFile(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "参数错误：%v\n\n", err)
 		fmt.Fprint(os.Stderr, usageText)
-		os.Exit(2)
+		return 2
 	}
-	cmd := os.Args[1]
+	stop, err := startLogTee(logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "提示：日志文件不可用（%v），本次只输出到终端\n", err)
+	}
+	code := dispatch(rest)
+	if stop != nil {
+		stop(code)
+	}
+	return code
+}
+
+// dispatch 按子命令分派并返回退出码。
+func dispatch(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprint(os.Stderr, usageText)
+		return 2
+	}
+	cmd := args[0]
 	var err error
 	switch cmd {
 	case "repair":
-		err = cmdRepair(os.Args[2:])
+		err = cmdRepair(args[1:])
 	case "status":
-		err = cmdStatus(os.Args[2:])
+		err = cmdStatus(args[1:])
 	case "sync":
-		err = cmdSync(os.Args[2:])
+		err = cmdSync(args[1:])
 	case "setup":
-		err = cmdSetup(os.Args[2:])
+		err = cmdSetup(args[1:])
 	case "verify":
-		err = cmdVerify(os.Args[2:])
+		err = cmdVerify(args[1:])
 	case "version", "-v", "--version":
 		fmt.Println("blocksync " + version.Version)
-		return
+		return 0
 	case "-h", "--help", "help":
 		fmt.Print(usageText)
-		return
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "未知子命令 %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usageText)
-		os.Exit(2)
+		return 2
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+// takeLogFile 取出全局选项 --log-file，返回其余参数与日志文件路径。
+func takeLogFile(args []string) (rest []string, path string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--log-file":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return nil, "", errors.New("--log-file 需要一个文件路径")
+			}
+			path = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--log-file="):
+			path = strings.TrimPrefix(a, "--log-file=")
+			if path == "" {
+				return nil, "", errors.New("--log-file 需要一个文件路径")
+			}
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, path, nil
 }
 
 // reorder 把选项挪到位置参数之前，使 `blocksync sync A B --dry-run` 这种写法可用。

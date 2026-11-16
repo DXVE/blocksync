@@ -441,3 +441,32 @@ func TestLegacyDirExcludesIgnored(t *testing.T) {
 		t.Fatal("旧的按目录排除文件应已停用，文件应被同步")
 	}
 }
+
+// --log-file 必须同时收录标准输出与标准错误，并在结尾记录退出码。
+func TestLogFileCapturesBothStreams(t *testing.T) {
+	dir := t.TempDir()
+	failLog := filepath.Join(dir, "nested", "fail.log")
+	runExpectFail(t, "sync", filepath.Join(dir, "no-src"), filepath.Join(dir, "no-dst"), "--log-file", failLog)
+
+	data, err := os.ReadFile(failLog)
+	if err != nil {
+		t.Fatalf("失败运行的日志文件未生成: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "错误:") {
+		t.Fatalf("日志文件应包含标准错误里的错误行，实际内容:\n%s", got)
+	}
+	if !strings.Contains(got, "===== 结束：退出码 1 =====") {
+		t.Fatalf("日志文件应记录退出码，实际内容:\n%s", got)
+	}
+
+	okLog := filepath.Join(dir, "ok.log")
+	run(t, "version", "--log-file", okLog)
+	data, err = os.ReadFile(okLog)
+	if err != nil {
+		t.Fatalf("成功运行的日志文件未生成: %v", err)
+	}
+	if !strings.Contains(string(data), "blocksync ") {
+		t.Fatalf("日志文件应包含标准输出里的版本行，实际内容:\n%s", data)
+	}
+}

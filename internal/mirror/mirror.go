@@ -23,10 +23,14 @@ const copyChunk = 4 << 20
 // 两侧共用同一常量，避免一处改字导致确认流程失效。
 const ConfirmMarker = "需要确认后才会开始写入"
 
+// DoneMarker 是逐文件完成行的状态词：进度行在处理前打印，完成行在处理结束后打印。
+// 界面据此区分“正在处理”与“已处理完”，不把它算进进度。
+const DoneMarker = "完成"
+
 // ResultPattern 匹配 sync 结束时的汇总行，供界面提取改动数量与读写量。
 var ResultPattern = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
 
-// ProgressPattern 匹配逐文件进度行 `[已处理/总数] 状态  相对路径`。
+// ProgressPattern 匹配逐文件行 `[序号/总数] 状态  相对路径`；完成行同样匹配。
 var ProgressPattern = regexp.MustCompile(`\[(\d+)/(\d+)\]\s*(.*)`)
 
 // Options 一次同步的参数。
@@ -177,6 +181,11 @@ func Run(o Options) (*Report, error) {
 	}
 
 	total := len(srcFiles) + len(dels)
+	// 进度行在处理前打印，写入与校验期间没有输出；完成行在处理结束后补上，
+	// 让“正在处理”和“已处理完”有明确边界，也便于判断卡在哪个文件。
+	markDone := func(idx int, rel string) {
+		fmt.Fprintf(out, "[%d/%d] %s  %s\n", idx, total, DoneMarker, rel)
+	}
 	// 首个文件可能长时间无输出，先报一行，避免被误认为卡死
 	if o.DryRun {
 		fmt.Fprintln(out, "测试比对开始…")
@@ -287,7 +296,7 @@ func Run(o Options) (*Report, error) {
 		// 目标缺失或长度不同时，即使没有变化块也要写一次：覆盖空文件与截断到 0 的情况
 		needWrite := changedBytes > 0 || !dstExists || (dstIdx != nil && dstIdx.Size != uint64(f.Size))
 
-		status, detail := "未变", ""
+		status, detail := "无变化", ""
 		if needWrite {
 			rep.FilesChanged++
 			switch {
@@ -339,6 +348,7 @@ func Run(o Options) (*Report, error) {
 			}
 		}
 		if o.DryRun {
+			markDone(i+1, f.Rel)
 			continue
 		}
 
@@ -357,14 +367,17 @@ func Run(o Options) (*Report, error) {
 				return nil, err
 			}
 		}
+		markDone(i+1, f.Rel)
 	}
 
 	// 输出目录里多出来的文件按镜像语义删除
 	for j, f := range dels {
 		abs := filepath.Join(o.Target, filepath.FromSlash(f.Rel))
+		idx := len(srcFiles) + j + 1
 		rep.FilesDeleted++
-		fmt.Fprintf(out, "[%d/%d] 删除  %s（源端已不存在）\n", len(srcFiles)+j+1, total, f.Rel)
+		fmt.Fprintf(out, "[%d/%d] 删除  %s（源端已不存在）\n", idx, total, f.Rel)
 		if o.DryRun {
+			markDone(idx, f.Rel)
 			continue
 		}
 		if err := o.guardTarget(abs, srcRoot, dstRoot); err != nil {
@@ -374,6 +387,7 @@ func Run(o Options) (*Report, error) {
 			return nil, fmt.Errorf("删除 %s 失败: %w", f.Rel, err)
 		}
 		_ = dstStore.Delete(f.Rel)
+		markDone(idx, f.Rel)
 	}
 	// 两侧索引都收缩到源文件集合，避免残留条目
 	if !o.DryRun {

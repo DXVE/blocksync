@@ -107,6 +107,7 @@ dist\BlockSync-CLI.exe sync "D:\data\project" "E:\backup\project"
 | `--lb` / `--sb` | 粗块/细块大小，默认 4 MiB / 32 KiB，两侧必须一致 |
 | `--yes` | 跳过首次同步与删除前的确认，供脚本无人值守调用 |
 | `--allow-mass-delete` | 删除数量超过安全上限（`max(100, 源文件总数 × 1%)`）时仍继续 |
+| `--log-file 路径` | 本次全部输出（含进度与错误）另存一份到文件，首尾记录时间、参数与退出码 |
 
 完整子命令、选项与退出码见 [wiki/命令参考](wiki/命令参考.md)。
 

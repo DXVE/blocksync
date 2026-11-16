@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,8 +72,12 @@ var (
 	pSetForegroundWindow     = user32.NewProc("SetForegroundWindow")
 	pBringWindowToTop        = user32.NewProc("BringWindowToTop")
 
-	pCreateFontW  = gdi32.NewProc("CreateFontW")
-	pDeleteObject = gdi32.NewProc("DeleteObject")
+	pCreateFontW    = gdi32.NewProc("CreateFontW")
+	pDeleteObject   = gdi32.NewProc("DeleteObject")
+	pCreateCompatDC = gdi32.NewProc("CreateCompatibleDC")
+	pDeleteDC       = gdi32.NewProc("DeleteDC")
+	pSelectObject   = gdi32.NewProc("SelectObject")
+	pGetTextExtent  = gdi32.NewProc("GetTextExtentPoint32W")
 
 	pSHBrowseForFolderW   = shell32.NewProc("SHBrowseForFolderW")
 	pSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
@@ -125,6 +130,8 @@ const (
 	emReplaceSel  = 0x00C2
 	emSetLimitTxt = 0x00C5
 	emScrollCaret = 0x00B7
+	emSetTabStops = 0x00CB
+	emPosFromChar = 0x00D6
 
 	pbmSetPos     = 0x0402
 	pbmSetRange32 = 0x0406
@@ -204,6 +211,8 @@ type msgT struct {
 }
 
 type rect struct{ left, top, right, bottom int32 }
+
+type sizeT struct{ cx, cy int32 }
 
 type browseInfo struct {
 	hwndOwner      syscall.Handle
@@ -312,6 +321,8 @@ var (
 	hBtnSync, hBtnDry, hBtnCancel syscall.Handle
 	hBtnCfgMgr                    syscall.Handle
 	hStatus, hProgress, hLog      syscall.Handle
+	hMeasureDC                    uintptr // 日志区字体度量用，读取协程独占
+	logColWidth                   int     // 文件列可用像素宽度
 
 	mu         sync.Mutex
 	logQueue   []string
@@ -326,8 +337,10 @@ var (
 	cancelled  bool
 	runStart   time.Time
 	proc       *exec.Cmd
-	logChars   int
 	runLog     []string // 本次运行的全部输出行（仅界面线程读写），结束判定不能只看最后一批
+
+	logSink      *logFileSink // 本次启动的日志文件；打开失败为 nil
+	logPathShown bool         // 日志文件路径是否已在界面上提示过
 
 	lastSrc, lastDst                                   string
 	lastDry, lastVerify, lastFull, lastForce, lastMass bool
@@ -529,33 +542,418 @@ func initCommonControls() {
 	})
 }
 
-// ---------- 执行 ----------
+// ---------- 日志区 ----------
+
+// logModel 是日志区的显示模型：保存当前显示的整行，控件只是它的视图。
+// 超过上限时按整行丢弃最旧的内容，完整日志由日志文件保留。
+type logModel struct {
+	lines []string
+	chars int // UTF-16 字符数（含行尾换行），与 EDIT 控件的字符计数一致
+	limit int
+}
+
+// logView 是界面日志的显示模型，跨运行保留。
+var logView = &logModel{limit: 500000}
+
+// utf16Len 返回字符串的 UTF-16 字符数，与 EDIT 控件的字符计数单位一致。
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// lineChars 返回一条日志行在控件里占用的字符数（含行尾换行）。
+func lineChars(s string) int { return utf16Len(s) + 2 }
+
+// linesChars 返回一组日志行的字符数合计。
+func linesChars(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		n += lineChars(l)
+	}
+	return n
+}
+
+// add 把新行并入模型，返回需要从控件头部删除的字符数与真正要追加的行。
+// 丢弃按整行进行，并一次腾到上限的八成，避免每批都从头部删一次。
+func (m *logModel) add(lines []string) (drop uintptr, keep []string) {
+	add := linesChars(lines)
+	if m.chars+add <= m.limit {
+		m.lines = append(m.lines, lines...)
+		m.chars += add
+		return 0, lines
+	}
+	target := m.limit * 7 / 8
+	n := 0
+	for n < len(m.lines) && (m.chars+add > m.limit || m.chars > target) {
+		c := lineChars(m.lines[n])
+		m.chars -= c
+		drop += uintptr(c)
+		n++
+	}
+	keep = lines
+	for len(keep) > 1 && m.chars+linesChars(keep) > m.limit {
+		keep = keep[1:]
+	}
+	m.lines = append(m.lines[:0], m.lines[n:]...)
+	m.lines = append(m.lines, keep...)
+	m.chars += linesChars(keep)
+	return drop, keep
+}
+
+// text 返回模型对应的完整日志文本，用于重建控件。
+func (m *logModel) text() string {
+	if len(m.lines) == 0 {
+		return ""
+	}
+	return strings.Join(m.lines, "\r\n") + "\r\n"
+}
 
 func appendLog(lines ...string) {
 	mu.Lock()
+	logSink.write(lines...)
 	logQueue = append(logQueue, lines...)
 	mu.Unlock()
 }
 
-// appendLogText 把一组行按顺序写入日志区；仅在界面线程调用。
+// appendLogFile 只写入日志文件、不在界面显示，用于运行边界标记。
+func appendLogFile(lines ...string) {
+	mu.Lock()
+	logSink.write(lines...)
+	mu.Unlock()
+}
+
+// logLen 返回日志区当前的字符数，等于可用的插入位置。
+func logLen() uintptr {
+	n, _, _ := pGetWindowTextLengthW.Call(uintptr(hLog))
+	return n
+}
+
+// rebuildLog 按模型重写整个日志区；模型与控件失步时用它自愈。
+func rebuildLog() {
+	setText(hLog, logView.text())
+	end := logLen()
+	pSendMessageW.Call(uintptr(hLog), emSetSel, end, end)
+	pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
+}
+
+// appendLogText 把一组行追加到日志区末尾；仅在界面线程调用。
+// 插入点按文本长度显式定位：只读控件里 EM_SETSEL(-1,-1) 只收起选区、不移动插入点，
+// 用户点过或选过日志后插入点停在中间，后续行会插进旧内容中间，最新日志看似卡住。
+// 超过上限时从头部整行丢弃，控件与模型保持同步；完整内容以日志文件为准。
 func appendLogText(lines []string) {
 	if len(lines) == 0 {
 		return
 	}
-	text := strings.Join(lines, "\r\n") + "\r\n"
-	pSendMessageW.Call(uintptr(hLog), emSetSel, ^uintptr(0), ^uintptr(0))
-	pSendMessageW.Call(uintptr(hLog), emReplaceSel, 0, uintptr(unsafe.Pointer(u16(text))))
-	pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
-	logChars += len(text)
+	drop, keep := logView.add(lines)
 	runLog = append(runLog, lines...)
 	if len(runLog) > 2000 {
 		runLog = append(runLog[:0], runLog[len(runLog)-2000:]...)
 	}
-	if logChars > 500000 {
-		setText(hLog, "")
-		setText(hLog, text)
-		logChars = len(text)
+	if drop > logLen() {
+		// 控件内容与模型对不上（外部截断、控件长度上限），按模型整体重建
+		rebuildLog()
+		return
 	}
+	if drop > 0 {
+		pSendMessageW.Call(uintptr(hLog), emSetSel, 0, drop)
+		pSendMessageW.Call(uintptr(hLog), emReplaceSel, 0, uintptr(unsafe.Pointer(u16(""))))
+	}
+	text := strings.Join(keep, "\r\n") + "\r\n"
+	end := logLen()
+	pSendMessageW.Call(uintptr(hLog), emSetSel, end, end)
+	pSendMessageW.Call(uintptr(hLog), emReplaceSel, 0, uintptr(unsafe.Pointer(u16(text))))
+	pSendMessageW.Call(uintptr(hLog), emScrollCaret, 0, 0)
+
+	if uintptr(logView.chars) != logLen() {
+		rebuildLog()
+	}
+}
+
+// ---------- 日志区表格 ----------
+
+// 日志区按 5 列排版：序号 / 状态 / 文件 / 变化量 / 完成。
+// 列由控件制表位对齐；窗口固定尺寸，列宽在启动时算一次。
+type tableRow struct {
+	idx    string // [i/N]
+	status string
+	path   string // 相对路径，未截断
+	amount string // 变化量；无变化与删除填 —
+	done   bool   // 是否已收到该文件的完成行
+}
+
+// changeReasons 是 CLI 逐文件行尾括注的原因，解析时整段剥掉。
+var changeReasons = map[string]bool{
+	"全量比对": true, "源索引不存在": true, "源文件长度变化": true,
+	"源文件修改时间变化": true, "块大小不同": true, "源索引不可用": true,
+	"源端已不存在": true,
+}
+
+// parseTableRow 从 CLI 的逐文件行里解出表格字段；不是逐文件行时返回 false。
+func parseTableRow(line string) (tableRow, bool) {
+	m := mirror.ProgressPattern.FindStringSubmatch(line)
+	if m == nil || !strings.HasPrefix(line, "[") {
+		return tableRow{}, false
+	}
+	status, tail, _ := strings.Cut(m[3], "  ")
+	row := tableRow{idx: "[" + m[1] + "/" + m[2] + "]", status: strings.TrimSpace(status)}
+	if row.status == mirror.DoneMarker {
+		row.done = true
+		row.path = strings.TrimSpace(tail)
+		return row, true
+	}
+	row.path, row.amount = splitDetail(row.status, tail)
+	return row, true
+}
+
+// splitDetail 从「路径 + 说明 + 原因」里拆出路径与变化量。
+func splitDetail(status, tail string) (path, amount string) {
+	rest := tail
+	if i := strings.LastIndex(rest, "（"); i >= 0 && strings.HasSuffix(rest, "）") {
+		if changeReasons[rest[i+len("（"):len(rest)-len("）")]] {
+			rest = rest[:i]
+		}
+	}
+	rest = strings.TrimRight(rest, " ")
+	switch status {
+	case "更新":
+		const blockTag = "  变化块 "
+		if i := strings.LastIndex(rest, blockTag); i >= 0 {
+			d := rest[i+len(blockTag):]
+			const totalTag = "（文件共 "
+			if j := strings.Index(d, totalTag); j > 0 && strings.HasSuffix(d, "）") {
+				amount = d[:j] + " / " + d[j+len(totalTag):len(d)-len("）")]
+				rest = rest[:i]
+			}
+		}
+	case "新增":
+		if i := strings.LastIndex(rest, "  （"); i >= 0 && strings.HasSuffix(rest, "）") {
+			amount = rest[i+len("  （") : len(rest)-len("）")]
+			rest = rest[:i]
+		}
+	case "截断":
+		const truncTag = "  截断到 "
+		if i := strings.LastIndex(rest, truncTag); i >= 0 {
+			amount = rest[i+len(truncTag):]
+			rest = rest[:i]
+		}
+	}
+	if amount == "" {
+		amount = "—"
+	}
+	return strings.TrimRight(rest, " "), amount
+}
+
+// formatTableRow 把一条记录渲染成表格行；done 时在行尾补完成列。
+func formatTableRow(r tableRow, pathText string, done bool) string {
+	var b strings.Builder
+	b.WriteString(r.idx)
+	b.WriteString("\t")
+	b.WriteString(r.status)
+	b.WriteString("\t")
+	b.WriteString(pathText)
+	b.WriteString("\t")
+	b.WriteString(r.amount)
+	if done {
+		b.WriteString("\t")
+		b.WriteString(mirror.DoneMarker)
+	}
+	return b.String()
+}
+
+// fitPath 把路径压进给定像素宽度，超出时中间省略、保留首尾。
+// 尾部比例更大，保住 split-000001-s001.vmdk 这类靠后缀区分的名字。
+func fitPath(s string, maxPx int, widthOf func(string) int) string {
+	if maxPx <= 0 || widthOf(s) <= maxPx {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= 1 {
+		return s
+	}
+	best := ""
+	lo, hi := 1, len(r)-1
+	for lo <= hi {
+		keep := (lo + hi) / 2
+		head := keep * 2 / 5
+		if head < 1 {
+			head = 1
+		}
+		tail := keep - head
+		cand := string(r[:head]) + "…" + string(r[len(r)-tail:])
+		if widthOf(cand) <= maxPx {
+			best = cand
+			lo = keep + 1
+		} else {
+			hi = keep - 1
+		}
+	}
+	if best == "" {
+		return "…"
+	}
+	return best
+}
+
+// textWidth 用日志区字体量一段文字的像素宽度；hMeasureDC 由读取协程独占。
+func textWidth(s string) int {
+	if hMeasureDC == 0 || s == "" {
+		return 0
+	}
+	p, err := syscall.UTF16FromString(s)
+	if err != nil {
+		return 0
+	}
+	var sz sizeT
+	pGetTextExtent.Call(hMeasureDC, uintptr(unsafe.Pointer(&p[0])), uintptr(len(p)-1), uintptr(unsafe.Pointer(&sz)))
+	return int(sz.cx)
+}
+
+// tabUnitPixels 实测 1 个制表位单位对应的像素宽度：
+// 先写两行探针量出制表位落点，再按比例换算，避免依赖字体度量的隐含规则。
+func tabUnitPixels() float64 {
+	probe := func(units uint32) int {
+		pSendMessageW.Call(uintptr(hLog), emSetTabStops, 1, uintptr(unsafe.Pointer(&units)))
+		setText(hLog, "a	b")
+		r, _, _ := pSendMessageW.Call(uintptr(hLog), emPosFromChar, 2, 0)
+		return int(r & 0xFFFF)
+	}
+	x1, x2 := probe(100), probe(300)
+	setText(hLog, "")
+	pSendMessageW.Call(uintptr(hLog), emSetTabStops, 0, 0) // 恢复默认制表位
+	if x2 <= x1 {
+		return 0
+	}
+	return float64(x2-x1) / 200
+}
+
+// setupLogColumns 按控件实际宽度设置制表位，并记下文件名列的像素宽度。
+func setupLogColumns() {
+	var rc rect
+	pGetClientRect.Call(uintptr(hLog), uintptr(unsafe.Pointer(&rc)))
+	w := int(rc.right - rc.left)
+	if w <= 0 {
+		return
+	}
+	factor := tabUnitPixels()
+	if factor <= 0 {
+		factor = 1.8
+	}
+	edges := []float64{0.10, 0.20, 0.71, 0.93}
+	var stops [4]uint32
+	for i, e := range edges {
+		px := float64(w) * e
+		stops[i] = uint32(px/factor + 0.5)
+	}
+	pSendMessageW.Call(uintptr(hLog), emSetTabStops, uintptr(len(stops)), uintptr(unsafe.Pointer(&stops[0])))
+	logColWidth = int(float64(w)*edges[2]) - int(float64(w)*edges[1]) - 12
+}
+
+// logDisplayLine 只把一行放进界面队列，不写日志文件。
+func logDisplayLine(line string) {
+	mu.Lock()
+	logQueue = append(logQueue, line)
+	mu.Unlock()
+}
+
+// logTable 把逐文件原始行折叠成表格行：进度行先缓存，完成行到达后合并成一行输出，
+// 因此日志区只会出现「已处理完」的记录，不存在半行或顺序错位。
+type logTable struct {
+	pending *tableRow
+}
+
+// start 缓存一条进度行；上一条若迟迟没有完成行，先按未完成输出。
+func (t *logTable) start(row tableRow, emit func(string)) {
+	t.flush(emit, false)
+	cp := row
+	t.pending = &cp
+}
+
+// finish 处理完成行：序号一致时与缓存行合并，否则原样输出这一行。
+func (t *logTable) finish(idx, raw string, emit func(string)) {
+	if t.pending != nil && t.pending.idx == idx {
+		t.flush(emit, true)
+		return
+	}
+	emit(raw)
+}
+
+// flush 输出缓存行；done 决定是否补完成列。
+func (t *logTable) flush(emit func(string), done bool) {
+	if t.pending == nil {
+		return
+	}
+	row := *t.pending
+	t.pending = nil
+	emit(formatTableRow(row, fitPath(row.path, logColWidth, textWidth), done))
+}
+
+// progressOf 从逐文件行里取进度；完成行与进度行同号，不算进度。
+func progressOf(line string) (cur, total int, ok bool) {
+	m := mirror.ProgressPattern.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	if strings.HasPrefix(strings.TrimSpace(m[3]), mirror.DoneMarker) {
+		return 0, 0, false
+	}
+	cur, _ = strconv.Atoi(m[1])
+	total, _ = strconv.Atoi(m[2])
+	return cur, total, total > 0
+}
+
+// readLogStream 逐行读取子进程输出并交给 onLine，直到读到 EOF；返回非 EOF 的读取错误。
+// 行长度不设上限：超长行会累积后整行交付，不会像 Scanner 那样连后续输出一起丢掉。
+func readLogStream(r io.Reader, onLine func(string)) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		line, err := br.ReadString('\n')
+		line = strings.TrimSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\r")
+		if line != "" || err == nil {
+			onLine(line)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+// runVerb 返回日志文件里用于标记运行类型的词。
+func runVerb(dry bool) string {
+	if dry {
+		return "dry-run"
+	}
+	return "sync"
+}
+
+// runOptions 把本次运行的非默认选项拼成日志标记，默认配置不写。
+func runOptions(verify, full, force, allowMass bool) string {
+	var opts []string
+	if verify {
+		opts = append(opts, "--verify")
+	}
+	if full {
+		opts = append(opts, "--full")
+	}
+	if force {
+		opts = append(opts, "--force")
+	}
+	if allowMass {
+		opts = append(opts, "--allow-mass-delete")
+	}
+	if len(opts) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(opts, " ") + "]"
 }
 
 // flushPendingLog 立即写入队列中已有的行；仅在界面线程调用。
@@ -572,6 +970,8 @@ func lockExists(dir string) bool {
 	_, err := os.Stat(filepath.Join(state.Dir(dir), "lock"))
 	return err == nil
 }
+
+// ---------- 执行 ----------
 
 func startRun(dry, verify, full, force, allowMass bool) {
 	src := strings.TrimSpace(getText(hEditSrc))
@@ -619,7 +1019,17 @@ func startRun(dry, verify, full, force, allowMass bool) {
 	// 先把上一次运行遗留的行写入，再插入分隔行，保证先后顺序
 	flushPendingLog()
 	runLog = nil
-	if logChars > 0 {
+	if !logPathShown {
+		logPathShown = true
+		if logSink != nil {
+			appendLog("日志文件：" + logSink.path)
+		} else {
+			appendLog("提示：日志文件不可用，本次只在界面保留日志")
+		}
+	}
+	// 日志文件里记下本次运行的边界，事后可按运行定位
+	appendLogFile(fmt.Sprintf("===== %s  %s  %s -> %s%s =====", time.Now().Format("2006-01-02 15:04:05"), runVerb(dry), src, dst, runOptions(verify, full, force, allowMass)))
+	if logLen() > 0 {
 		if dry {
 			appendLog("", "----- 测试比对 -----")
 		} else {
@@ -675,12 +1085,26 @@ func startRun(dry, verify, full, force, allowMass bool) {
 
 	go func() {
 		defer r.Close()
-		sc := bufio.NewScanner(r)
-		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 		var recent []string
-		for sc.Scan() {
-			line := sc.Text()
-			appendLog(line)
+		var table logTable
+		onLine := func(line string) {
+			if row, ok := parseTableRow(line); ok {
+				// 日志文件保留 CLI 原始行，界面才做表格化
+				appendLogFile(line)
+				if row.done {
+					table.finish(row.idx, line, logDisplayLine)
+				} else {
+					table.start(row, logDisplayLine)
+					if c, t, ok := progressOf(line); ok {
+						mu.Lock()
+						progCur, progTotal, progKnown = c, t, true
+						mu.Unlock()
+					}
+				}
+			} else {
+				table.flush(logDisplayLine, false)
+				appendLog(line)
+			}
 			if strings.Contains(line, "已取消") {
 				mu.Lock()
 				cancelled = true
@@ -699,19 +1123,19 @@ func startRun(dry, verify, full, force, allowMass bool) {
 				_, _ = inW.Write([]byte(answer))
 				// 确认框在读取协程里弹出，关闭后由界面线程把主窗口拉回前台
 				pPostMessageW.Call(uintptr(mainHwnd), wmBringFront, 0, 0)
-				continue
+				return
 			}
 			recent = append(recent, line)
 			if len(recent) > 12 {
 				recent = recent[len(recent)-12:]
 			}
-			if m := mirror.ProgressPattern.FindStringSubmatch(line); m != nil {
-				c, _ := strconv.Atoi(m[1])
-				t, _ := strconv.Atoi(m[2])
-				mu.Lock()
-				progCur, progTotal, progKnown = c, t, t > 0
-				mu.Unlock()
-			}
+		}
+		err := readLogStream(r, onLine)
+		// 进程被中止或中途失败时，最后一条记录也要显示出来（完成列留空）
+		table.flush(logDisplayLine, false)
+		if err != nil {
+			// 不再静默结束：读取中断必须留下痕迹，否则错误行会凭空消失
+			appendLog(fmt.Sprintf("提示：读取主程序输出中断（%v），其后的输出可能缺失", err))
 		}
 		// 读端排空且进程已退出，才允许界面开始下一次运行
 		mu.Lock()
@@ -1343,7 +1767,7 @@ func flushUI() {
 		pSendMessageW.Call(uintptr(hProgress), pbmSetMarquee, 0, 0)
 		pSendMessageW.Call(uintptr(hProgress), pbmSetRange32, 0, uintptr(total))
 		pSendMessageW.Call(uintptr(hProgress), pbmSetPos, uintptr(cur), 0)
-		setText(hStatus, fmt.Sprintf("已处理 %d / %d 个文件", cur, total))
+		setText(hStatus, fmt.Sprintf("正在处理 %d / %d 个文件", cur, total))
 	}
 
 	if fin && running {
@@ -1360,6 +1784,7 @@ func flushUI() {
 		pSendMessageW.Call(uintptr(hProgress), pbmSetPos, done, 0)
 		joined := strings.Join(runLog, "\n")
 		elapsed := time.Since(start).Truncate(time.Second)
+		appendLogFile(fmt.Sprintf("===== 结束：退出码 %d，耗时 %s =====", code, elapsed))
 		if wasCancelled {
 			setText(hStatus, "已取消，未写入任何文件")
 		} else if code == 0 {
@@ -1417,19 +1842,25 @@ func onCreate() {
 	h, _, _ := pCreateFontW.Call(uintptr(fh), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(face)))
 	uiFont = syscall.Handle(h)
 
+	// 日志区按像素排版：制表位与文件名省略都要用这个字体度量
+	hMeasureDC, _, _ = pCreateCompatDC.Call(0)
+	if hMeasureDC != 0 {
+		pSelectObject.Call(hMeasureDC, uintptr(uiFont))
+	}
+
 	label := func(text string, x, y, w int) {
 		create("STATIC", text, wsChild|wsVisible, x, y, w, 22, 0)
 	}
 
 	label("输入目录", 16, 18, 74)
-	hEditSrc = create("EDIT", "", wsChild|wsVisible|wsTabStop|wsBorder|esAutohscroll, 96, 16, 480, 26, idEditSrc)
-	hBtnBrowseSrc = create("BUTTON", "浏览…", wsChild|wsVisible|wsTabStop|bsPushbutton, 584, 16, 56, 26, idBSrc)
+	hEditSrc = create("EDIT", "", wsChild|wsVisible|wsTabStop|wsBorder|esAutohscroll, 96, 16, 544, 26, idEditSrc)
+	hBtnBrowseSrc = create("BUTTON", "浏览…", wsChild|wsVisible|wsTabStop|bsPushbutton, 648, 16, 56, 26, idBSrc)
 
 	label("输出目录", 16, 52, 74)
-	hEditDst = create("EDIT", "", wsChild|wsVisible|wsTabStop|wsBorder|esAutohscroll, 96, 50, 480, 26, idEditDst)
-	hBtnBrowseDst = create("BUTTON", "浏览…", wsChild|wsVisible|wsTabStop|bsPushbutton, 584, 50, 56, 26, idBDst)
+	hEditDst = create("EDIT", "", wsChild|wsVisible|wsTabStop|wsBorder|esAutohscroll, 96, 50, 544, 26, idEditDst)
+	hBtnBrowseDst = create("BUTTON", "浏览…", wsChild|wsVisible|wsTabStop|bsPushbutton, 648, 50, 56, 26, idBDst)
 
-	hBtnSwap = create("BUTTON", "交换", wsChild|wsVisible|wsTabStop|bsPushbutton, 648, 16, 64, 60, idSwap)
+	hBtnSwap = create("BUTTON", "交换", wsChild|wsVisible|wsTabStop|bsPushbutton, 712, 16, 64, 60, idSwap)
 
 	hChkVerify = create("BUTTON", "写入后复读校验", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 96, 86, 124, 22, idChkVer)
 	hChkFull = create("BUTTON", "忽略修改时间，全量比对", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 236, 86, 180, 22, idChkFull)
@@ -1438,25 +1869,26 @@ func onCreate() {
 	hBtnDry = create("BUTTON", "测试比对（只读）", wsChild|wsVisible|wsTabStop|bsPushbutton, 96, 116, 140, 30, idDry)
 	hBtnSync = create("BUTTON", "开始同步", wsChild|wsVisible|wsTabStop|bsPushbutton, 246, 116, 140, 30, idSync)
 	hBtnCancel = create("BUTTON", "取消", wsChild|wsVisible|wsTabStop|bsPushbutton, 396, 116, 76, 30, idCancel)
-	hBtnCfgMgr = create("BUTTON", "配置管理…", wsChild|wsVisible|wsTabStop|bsPushbutton, 592, 116, 120, 30, idCfgMgr)
+	hBtnCfgMgr = create("BUTTON", "配置管理…", wsChild|wsVisible|wsTabStop|bsPushbutton, 656, 116, 120, 30, idCfgMgr)
 
-	hProgress = create("msctls_progress32", "", wsChild|wsVisible|pbsSmooth|pbsMarquee, 96, 156, 616, 16, idProg)
+	hProgress = create("msctls_progress32", "", wsChild|wsVisible|pbsSmooth|pbsMarquee, 96, 156, 680, 16, idProg)
 	pSendMessageW.Call(uintptr(hProgress), pbmSetRange32, 0, 100)
 
 	label("日志", 16, 186, 60)
 	// 版本号与命令行共用同一常量
-	create("STATIC", "版本 "+version.Version, wsChild|wsVisible|ssRight, 600, 186, 112, 22, 0)
+	create("STATIC", "版本 "+version.Version, wsChild|wsVisible|ssRight, 664, 186, 112, 22, 0)
 	hLog = create("EDIT", "",
-		wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutovscroll|esReadonly,
-		16, 208, 696, 292, idLog)
+		wsChild|wsVisible|wsBorder|wsVScroll|esMultiline|esAutovscroll|esAutohscroll|esReadonly,
+		16, 208, 760, 292, idLog)
 	pSendMessageW.Call(uintptr(hLog), emSetLimitTxt, 2000000, 0)
+	setupLogColumns()
 
 	create("STATIC", "提示：同步只写输出目录，不会改动输入目录；同步前请先关闭正在读写这些文件的程序。",
-		wsChild|wsVisible, 16, 510, 700, 20, 0)
+		wsChild|wsVisible, 16, 510, 760, 20, 0)
 
 	// 状态栏贴住窗口底边：先画边框条，再画文字，避免文字背景盖住边框
 	create("STATIC", "", wsChild|wsVisible|ssSunken, 0, 544, 728, 22, 0)
-	hStatus = create("STATIC", "准备就绪", wsChild|wsVisible|ssCenterImage, 8, 545, 712, 20, idStatus)
+	hStatus = create("STATIC", "准备就绪", wsChild|wsVisible|ssCenterImage, 8, 545, 776, 20, idStatus)
 
 	enable(hBtnCancel, false)
 
@@ -1557,6 +1989,10 @@ func wndProc(hwnd syscall.Handle, m uint32, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case wmDestroy:
+		if hMeasureDC != 0 {
+			pDeleteDC.Call(hMeasureDC)
+			hMeasureDC = 0
+		}
 		if uiFont != 0 {
 			pDeleteObject.Call(uintptr(uiFont))
 		}
@@ -1582,6 +2018,13 @@ func main() {
 	// 窗口与消息循环必须始终在同一个 OS 线程上，否则 GetMessage 会收不到本窗口的消息
 	runtime.LockOSThread()
 
+	// 日志文件在窗口创建前打开：越早接管，越不会漏掉启动阶段的输出
+	logSink = openLogFile(time.Now())
+	defer logSink.close()
+	if logSink != nil {
+		appendLogFile(fmt.Sprintf("===== %s  启动 blocksync %s =====", time.Now().Format("2006-01-02 15:04:05"), version.Version))
+	}
+
 	initDPI()
 
 	hi, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
@@ -1603,7 +2046,7 @@ func main() {
 	pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
 	const style = 0x00C00000 | 0x00080000 | 0x00020000 | 0x02000000 // CAPTION|SYSMENU|MINIMIZEBOX|CLIPCHILDREN
-	r := rect{0, 0, int32(sz(728)), int32(sz(566))}
+	r := rect{0, 0, int32(sz(792)), int32(sz(566))}
 	pAdjustWindowRectEx.Call(uintptr(unsafe.Pointer(&r)), uintptr(style), 1, 0) // bMenu=TRUE 计入菜单栏高度
 	wide, high := int(r.right-r.left), int(r.bottom-r.top)
 

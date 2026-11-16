@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -433,4 +434,44 @@ func TestIndexesNotRewrittenAfterUpdate(t *testing.T) {
 			t.Fatalf("增量同步后的空操作不应重写索引: %s", p)
 		}
 	}
+}
+
+// 每个逐文件行之后必须紧跟同号的完成行；dry-run 也一样。
+func TestProgressLinesGetDoneMarker(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	write(t, filepath.Join(src, "a.bin"), rnd(200<<10, 1))
+	write(t, filepath.Join(src, "b.bin"), rnd(100<<10, 2))
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(dry bool) {
+		var out bytes.Buffer
+		if _, err := Run(Options{
+			Source: src, Target: dst, LB: tLB, SB: tSB,
+			DryRun: dry, Excludes: scan.DefaultExcludes, Out: &out,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+		pairs := 0
+		for i := 0; i+1 < len(lines); i++ {
+			m := ProgressPattern.FindStringSubmatch(lines[i])
+			if m == nil || strings.HasPrefix(strings.TrimSpace(m[3]), DoneMarker) {
+				continue
+			}
+			n := ProgressPattern.FindStringSubmatch(lines[i+1])
+			if n == nil || !strings.HasPrefix(strings.TrimSpace(n[3]), DoneMarker) || n[1] != m[1] {
+				t.Fatalf("进度行后应紧跟同号完成行，实际输出:\n%s", out.String())
+			}
+			pairs++
+		}
+		if pairs != 2 {
+			t.Fatalf("dry=%v 时应有 2 个完成行，实际 %d，输出:\n%s", dry, pairs, out.String())
+		}
+	}
+	check(true)
+	check(false)
 }

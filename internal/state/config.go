@@ -272,16 +272,34 @@ func normalizeDir(p string) string {
 	return p
 }
 
-func ConfigPath() (string, error) {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		d, err := os.UserConfigDir()
-		if err != nil {
-			return "", fmt.Errorf("无法确定本机配置目录: %w", err)
-		}
-		base = d
+// baseDir 返回本机存放配置与日志的根目录。
+func baseDir() (string, error) {
+	if base := os.Getenv("LOCALAPPDATA"); base != "" {
+		return filepath.Join(base, "blocksync"), nil
 	}
-	return filepath.Join(base, "blocksync", "config.json"), nil
+	d, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("无法确定本机配置目录: %w", err)
+	}
+	return filepath.Join(d, "blocksync"), nil
+}
+
+// ConfigPath 返回本机配置文件路径。
+func ConfigPath() (string, error) {
+	base, err := baseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "config.json"), nil
+}
+
+// LogsDir 返回本机日志目录，界面按启动时间在此建立日志文件。
+func LogsDir() (string, error) {
+	base, err := baseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "logs"), nil
 }
 
 // LoadConfig 读取本机配置，不存在时返回 (nil, nil)。
