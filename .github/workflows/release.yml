@@ -15,6 +15,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # 生成更新日志需要历史与 tag，默认浅克隆拿不到
+          fetch-depth: 0
 
       - name: 校验 tag 与源码版本
         # 唯一来源是 internal/version 包的 Version 常量，两侧统一去掉 v 前缀后比较
@@ -138,6 +141,26 @@ jobs:
             Move-Item -LiteralPath "dist\$name.exe" -Destination "dist\${name}-$env:TAG_NAME.exe"
           }
 
+      - name: 生成更新日志
+        # 取上一个 tag 到本次 tag 的提交标题作为 Release 正文；没有历史 tag 时列出本次全部提交
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          # Windows runner 默认按 OEM 代码页解码 git 输出，中文标题会乱码
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+          $prev = git describe --tags --abbrev=0 "$tag^" 2>$null
+          if ($prev) {
+            $range = "$prev..$tag"
+            $title = "$prev → $tag"
+          } else {
+            $range = $tag
+            $title = "首个版本 $tag"
+          }
+          # 原生命令输出是数组，直接插值会用空格拼接，这里显式按行合并
+          $lines = (git log $range --no-merges --reverse --pretty=format:"- %s") -join "`n"
+          if (-not $lines) { $lines = "- 无提交标题" }
+          Set-Content -LiteralPath "$env:RUNNER_TEMP/release-notes.md" -Value "## $title`n`n$lines" -Encoding utf8
+
       - name: 清理同名 tag 的旧 release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -162,3 +185,4 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*.exe
+          body_path: ${{ runner.temp }}/release-notes.md
