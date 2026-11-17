@@ -29,7 +29,7 @@ build.cmd
 
 ## 输出格式契约
 
-`ConfirmMarker`、`DoneMarker`、`ProgressPattern`、`ResultPattern`（`internal/mirror`）是 CLI 与 GUI 之间的接口。改动任一输出行时同步三处：
+`ConfirmMarker`、`DoneMarker`、`CalcMarker`、`ProgressPattern`、`ResultPattern`（`internal/mirror`）是 CLI 与 GUI 之间的接口。改动任一输出行时同步三处：
 
 1. `wiki/命令参考.md` 的「输出格式」一节；
 2. 解析侧的常量与正则（`internal/mirror`、`cmd/blocksync-ui`）；

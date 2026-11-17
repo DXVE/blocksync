@@ -42,7 +42,7 @@ const usageText = `blocksync ` + version.Version + ` —— 大目录/大文件�
   blocksync setup --show                查看已保存的配置
 
 通用选项:
-  --dry-run     测试比对：只报告将搬运多少与具体文件，不写任何数据文件
+  --dry-run     测试比对：只报告要同步的内容与具体文件，不写任何数据文件
   --verify      写入后复读校验：把写下去的内容读回来重算哈希
   --full        忽略修改时间，全量比对：强制重读所有文件内容
   --workers N   哈希线程数，默认等于 CPU 核数
@@ -142,7 +142,7 @@ func takeLogFile(args []string) (rest []string, path string, err error) {
 	return rest, path, nil
 }
 
-// reorder 把选项挪到位置参数之前，使 `blocksync sync A B --dry-run` 这种写法可用。
+// reorder 把选项移到位置参数之前，使 `blocksync sync A B --dry-run` 这种写法可用。
 func reorder(args []string, takesValue map[string]bool) []string {
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {

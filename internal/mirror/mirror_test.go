@@ -95,7 +95,7 @@ func equalTrees(t *testing.T, a, b string) {
 	}
 }
 
-// 源文件在拷贝途中变短时必须报错，不能把缓冲区残留内容写进目标。
+// 源文件在复制途中变短时必须报错，不能把缓冲区残留内容写进目标。
 func TestCopyRangesDetectsShortSource(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.bin")
@@ -436,7 +436,7 @@ func TestIndexesNotRewrittenAfterUpdate(t *testing.T) {
 	}
 }
 
-// 每个逐文件行之后必须紧跟同号的完成行；dry-run 也一样。
+// 哈希计算行后紧跟同号结果行，结果行后紧跟同号完成行；dry-run 也一样。
 func TestProgressLinesGetDoneMarker(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src")
@@ -456,22 +456,164 @@ func TestProgressLinesGetDoneMarker(t *testing.T) {
 			t.Fatal(err)
 		}
 		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-		pairs := 0
+		results, calcs := 0, 0
 		for i := 0; i+1 < len(lines); i++ {
 			m := ProgressPattern.FindStringSubmatch(lines[i])
-			if m == nil || strings.HasPrefix(strings.TrimSpace(m[3]), DoneMarker) {
+			if m == nil {
 				continue
 			}
+			status := strings.TrimSpace(m[3])
 			n := ProgressPattern.FindStringSubmatch(lines[i+1])
-			if n == nil || !strings.HasPrefix(strings.TrimSpace(n[3]), DoneMarker) || n[1] != m[1] {
-				t.Fatalf("进度行后应紧跟同号完成行，实际输出:\n%s", out.String())
+			switch {
+			case strings.HasPrefix(status, CalcMarker):
+				if n == nil || n[1] != m[1] || strings.HasPrefix(strings.TrimSpace(n[3]), DoneMarker) ||
+					strings.HasPrefix(strings.TrimSpace(n[3]), CalcMarker) {
+					t.Fatalf("哈希计算行后应紧跟同号结果行，实际输出:\n%s", out.String())
+				}
+				calcs++
+			case strings.HasPrefix(status, DoneMarker):
+			default:
+				if n == nil || !strings.HasPrefix(strings.TrimSpace(n[3]), DoneMarker) || n[1] != m[1] {
+					t.Fatalf("进度行后应紧跟同号完成行，实际输出:\n%s", out.String())
+				}
+				results++
 			}
-			pairs++
 		}
-		if pairs != 2 {
-			t.Fatalf("dry=%v 时应有 2 个完成行，实际 %d，输出:\n%s", dry, pairs, out.String())
+		if results != 2 || calcs != 2 {
+			t.Fatalf("dry=%v 时应有 2 个结果行与 2 个哈希计算行，实际 %d / %d，输出:\n%s", dry, results, calcs, out.String())
 		}
 	}
 	check(true)
 	check(false)
+}
+
+// 两份索引都新鲜时不应输出哈希计算行：没有任何整文件读取。
+func TestNoCalcLineWhenIndexesFresh(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(src, "a.vmdk"), rnd(120<<10, 3))
+	run(t, src, dst, false)
+
+	var out bytes.Buffer
+	if _, err := Run(Options{
+		Source: src, Target: dst, LB: tLB, SB: tSB,
+		Excludes: scan.DefaultExcludes, Out: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), CalcMarker) {
+		t.Fatalf("索引全部可用时不应输出哈希计算行，实际输出:\n%s", out.String())
+	}
+}
+
+// 逐文件行的状态、原因与说明按约定排版；变短与清空并入更新。
+func TestProgressLineFormat(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	p := filepath.Join(src, "a.bin")
+	data := rnd(200<<10, 31)
+	write(t, p, data)
+
+	runOut := func() string {
+		var out bytes.Buffer
+		if _, err := Run(Options{
+			Source: src, Target: dst, LB: tLB, SB: tSB,
+			Excludes: scan.DefaultExcludes, Out: &out,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+
+	first := runOut()
+	if want := "[1/1] " + CalcMarker + "  a.bin  " + scan.FormatSize(uint64(len(data))); !strings.Contains(first, want) {
+		t.Fatalf("缺少哈希计算行 %q，实际输出:\n%s", want, first)
+	}
+	if want := "[1/1] 新增  a.bin  " + scan.FormatSize(uint64(len(data))); !strings.Contains(first, want) {
+		t.Fatalf("新增行应只写文件体积 %q，实际输出:\n%s", want, first)
+	}
+
+	mod := append([]byte(nil), data...)
+	copy(mod[1000:1100], []byte("changed"))
+	write(t, p, mod)
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	second := runOut()
+	if want := "[1/1] 更新  a.bin  （源文件修改时间变化）  变化 "; !strings.Contains(second, want) {
+		t.Fatalf("更新行应在路径后给出原因与变化量 %q，实际输出:\n%s", want, second)
+	}
+	if strings.Contains(second, "变化块") || strings.Contains(second, "文件共") {
+		t.Fatalf("旧的说明写法不应再出现，实际输出:\n%s", second)
+	}
+}
+
+// 变短且剩余内容一致时只需截断，状态仍归入更新。
+func TestTruncateLineFormat(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	p := filepath.Join(src, "b.bin")
+	data := rnd(200<<10, 32)
+	write(t, p, data)
+	run(t, src, dst, false)
+
+	if err := os.WriteFile(p, data[:100<<10], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := Run(Options{
+		Source: src, Target: dst, LB: tLB, SB: tSB,
+		Excludes: scan.DefaultExcludes, Out: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "[1/1] 更新  b.bin  （源文件长度变化）  截断到 100.0 KiB"; !strings.Contains(out.String(), want) {
+		t.Fatalf("变短应归入更新并给出截断说明 %q，实际输出:\n%s", want, out.String())
+	}
+}
+
+// 空文件不会实际读盘，不输出哈希计算行。
+func TestEmptyFileNoCalcLine(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(src, "empty.bin"), nil)
+
+	var out bytes.Buffer
+	if _, err := Run(Options{
+		Source: src, Target: dst, LB: tLB, SB: tSB,
+		Excludes: scan.DefaultExcludes, Out: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), CalcMarker) {
+		t.Fatalf("空文件不应输出哈希计算行，实际输出:\n%s", out.String())
+	}
+}
+
+// 汇总的读取量要包含区间复制与写入后校验的读回。
+func TestBytesReadIncludesRangesAndVerify(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	p := filepath.Join(src, "a.vmdk")
+	data := rnd(200<<10, 33)
+	write(t, p, data)
+	run(t, src, dst, false)
+
+	mod := append([]byte(nil), data...)
+	copy(mod[1000:1100], []byte("changed"))
+	write(t, p, mod)
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(Options{
+		Source: src, Target: dst, LB: tLB, SB: tSB, Verify: true,
+		Excludes: scan.DefaultExcludes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.BytesRead < 2*uint64(len(mod)) {
+		t.Fatalf("读取应计入源扫描、区间复制与校验复读，实际 %d 字节", rep.BytesRead)
+	}
+	if rep.BytesWritten > 2*uint64(tSB) {
+		t.Fatalf("写入量应接近一个细块，实际 %d", rep.BytesWritten)
+	}
 }

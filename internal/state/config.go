@@ -145,7 +145,7 @@ func (c *Config) RemoveExcludes(a, b string) bool {
 	return false
 }
 
-// MigrateExcludes 把排除规则从一对目录搬到另一对目录；
+// MigrateExcludes 把排除规则从一对目录迁移到另一对目录；
 // 目录对未变、旧目录对没有规则、或旧目录对仍被其它配置引用时不做处理。
 func (c *Config) MigrateExcludes(oldA, oldB, newA, newB, exceptName string) {
 	if c == nil || oldA == "" || oldB == "" || SamePair(oldA, oldB, newA, newB) {

@@ -310,6 +310,12 @@ const (
 	idDlgCancel = 2
 )
 
+// 逐文件阶段：计算哈希与处理（写入、校验）。状态栏按它切换文案。
+const (
+	phaseCalc = "calc"
+	phaseProc = "proc"
+)
+
 var (
 	hInstance syscall.Handle
 	mainHwnd  syscall.Handle
@@ -337,6 +343,7 @@ var (
 	readerDone bool
 	running    bool
 	cancelled  bool
+	runPhase   string // 当前逐文件阶段：phaseCalc / phaseProc
 	runStart   time.Time
 	proc       *exec.Cmd
 	runLog     []string // 本次运行的全部输出行（仅界面线程读写），结束判定不能只看最后一批
@@ -743,7 +750,7 @@ type tableRow struct {
 	done   bool   // 是否已收到该文件的完成行
 }
 
-// changeReasons 是 CLI 逐文件行尾括注的原因，解析时整段剥掉。
+// changeReasons 是 CLI 逐文件行里路径后的原因括注，解析时整段剥掉。
 var changeReasons = map[string]bool{
 	"全量比对": true, "源索引不存在": true, "源文件长度变化": true,
 	"源文件修改时间变化": true, "块大小不同": true, "源索引不可用": true,
@@ -763,46 +770,26 @@ func parseTableRow(line string) (tableRow, bool) {
 		row.path = strings.TrimSpace(tail)
 		return row, true
 	}
-	row.path, row.amount = splitDetail(row.status, tail)
+	row.path, row.amount = splitDetail(tail)
 	return row, true
 }
 
-// splitDetail 从「路径 + 说明 + 原因」里拆出路径与变化量。
-func splitDetail(status, tail string) (path, amount string) {
-	rest := tail
-	if i := strings.LastIndex(rest, "（"); i >= 0 && strings.HasSuffix(rest, "）") {
-		if changeReasons[rest[i+len("（"):len(rest)-len("）")]] {
-			rest = rest[:i]
+// splitDetail 从「路径 +（原因）+ 说明」里拆出路径与变化量。
+// 字段之间固定两个半角空格；原因是已知取值的全角括号段，解析时剥掉。
+func splitDetail(tail string) (path, amount string) {
+	fields := strings.Split(tail, "  ")
+	path = fields[0]
+	fields = fields[1:]
+	if len(fields) > 0 && strings.HasPrefix(fields[0], "（") && strings.HasSuffix(fields[0], "）") {
+		if changeReasons[fields[0][len("（"):len(fields[0])-len("）")]] {
+			fields = fields[1:]
 		}
 	}
-	rest = strings.TrimRight(rest, " ")
-	switch status {
-	case "更新":
-		const blockTag = "  变化块 "
-		if i := strings.LastIndex(rest, blockTag); i >= 0 {
-			d := rest[i+len(blockTag):]
-			const totalTag = "（文件共 "
-			if j := strings.Index(d, totalTag); j > 0 && strings.HasSuffix(d, "）") {
-				amount = d[:j] + " / " + d[j+len(totalTag):len(d)-len("）")]
-				rest = rest[:i]
-			}
-		}
-	case "新增":
-		if i := strings.LastIndex(rest, "  （"); i >= 0 && strings.HasSuffix(rest, "）") {
-			amount = rest[i+len("  （") : len(rest)-len("）")]
-			rest = rest[:i]
-		}
-	case "截断":
-		const truncTag = "  截断到 "
-		if i := strings.LastIndex(rest, truncTag); i >= 0 {
-			amount = rest[i+len(truncTag):]
-			rest = rest[:i]
-		}
-	}
+	amount = strings.Join(fields, "  ")
 	if amount == "" {
 		amount = "—"
 	}
-	return strings.TrimRight(rest, " "), amount
+	return strings.TrimRight(path, " "), amount
 }
 
 // formatTableRow 把一条记录渲染成表格行；done 时在行尾补完成列。
@@ -899,7 +886,7 @@ func setupLogColumns() {
 	if factor <= 0 {
 		factor = 1.8
 	}
-	edges := []float64{0.10, 0.20, 0.71, 0.93}
+	edges := []float64{0.08, 0.22, 0.69, 0.93}
 	var stops [4]uint32
 	for i, e := range edges {
 		px := float64(w) * e
@@ -936,8 +923,14 @@ type logTable struct {
 }
 
 // start 处理一条未完成的逐文件行：立即追加显示，并记为可补完成列的行。
+// 同一序号的行（哈希计算 → 结果）就地替换，一个文件始终只占一行。
 func (t *logTable) start(row tableRow, sink rowSink) {
 	cp := row
+	if t.cur != nil && t.cur.idx == row.idx {
+		sink.replace(formatTableRow(row, fitPath(row.path, logColWidth, textWidth), false))
+		t.cur = &cp
+		return
+	}
 	t.cur = &cp
 	sink.append(formatTableRow(row, fitPath(row.path, logColWidth, textWidth), false))
 }
@@ -1077,6 +1070,7 @@ func startRun(dry, verify, full, force, allowMass bool) {
 	finished, exitCode = false, 0
 	procExited, readerDone = false, false
 	cancelled = false
+	runPhase = ""
 	runStart = time.Now()
 	mu.Unlock()
 	// 先把上一次运行遗留的行写入，再插入分隔行，保证先后顺序
@@ -1157,6 +1151,13 @@ func startRun(dry, verify, full, force, allowMass bool) {
 			if row, ok := parseTableRow(line); ok {
 				// 日志文件保留 CLI 原始行，界面才做表格化
 				appendLogFile(line)
+				mu.Lock()
+				if row.status == mirror.CalcMarker {
+					runPhase = phaseCalc
+				} else {
+					runPhase = phaseProc
+				}
+				mu.Unlock()
 				if row.done {
 					table.finish(row.idx, line, sink)
 				} else {
@@ -1840,6 +1841,7 @@ func flushUI() {
 	cur, total, known := progCur, progTotal, progKnown
 	fin, code := finished, exitCode
 	wasCancelled := cancelled
+	ph := runPhase
 	start := runStart
 	mu.Unlock()
 
@@ -1849,7 +1851,11 @@ func flushUI() {
 		pSendMessageW.Call(uintptr(hProgress), pbmSetMarquee, 0, 0)
 		pSendMessageW.Call(uintptr(hProgress), pbmSetRange32, 0, uintptr(total))
 		pSendMessageW.Call(uintptr(hProgress), pbmSetPos, uintptr(cur), 0)
-		setText(hStatus, fmt.Sprintf("正在处理 %d / %d 个文件", cur, total))
+		if ph == phaseCalc {
+			setText(hStatus, "正在计算文件哈希…")
+		} else {
+			setText(hStatus, fmt.Sprintf("正在处理 %d / %d 个文件", cur, total))
+		}
 	}
 
 	if fin && running {
@@ -1877,9 +1883,9 @@ func flushUI() {
 					setText(hStatus, fmt.Sprintf("完成：改动 %s 个文件、删除 %s 个；读取 %s，写入 %s，耗时 %s", m[3], m[4], m[5], m[6], elapsed))
 				}
 			} else if strings.Contains(joined, "未改动任何数据") {
-				setText(hStatus, fmt.Sprintf("测试比对：没有需要搬运的内容，耗时 %s", elapsed))
+				setText(hStatus, fmt.Sprintf("测试比对：没有需要同步的内容，耗时 %s", elapsed))
 			} else if strings.Contains(joined, "已是最新") {
-				setText(hStatus, fmt.Sprintf("已是最新，没有需要搬运的内容，耗时 %s", elapsed))
+				setText(hStatus, fmt.Sprintf("已是最新，没有需要同步的内容，耗时 %s", elapsed))
 			} else {
 				setText(hStatus, fmt.Sprintf("完成，耗时 %s", elapsed))
 			}
@@ -1911,7 +1917,7 @@ func flushUI() {
 					return
 				}
 			}
-			setText(hStatus, fmt.Sprintf("失败（退出码 %d），耗时 %s，详见下面的日志", code, elapsed))
+			setText(hStatus, fmt.Sprintf("失败（退出码 %d），耗时 %s，详见日志", code, elapsed))
 		}
 	}
 }

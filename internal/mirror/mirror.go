@@ -27,6 +27,9 @@ const ConfirmMarker = "需要确认后才会开始写入"
 // 界面据此区分“正在处理”与“已处理完”，不把它算进进度。
 const DoneMarker = "完成"
 
+// CalcMarker 是哈希计算行的状态词：整文件读取开始前打印，界面据此切换状态栏阶段。
+const CalcMarker = "哈希计算"
+
 // ResultPattern 匹配 sync 结束时的汇总行，供界面提取改动数量与读写量。
 var ResultPattern = regexp.MustCompile(`完成(（测试比对）)?：扫描 (\d+) 个，改动 (\d+) 个，删除 (\d+) 个；读取 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))，(?:预计需)?写入 (\d+(?:\.\d+)? (?:B|KiB|MiB|GiB|TiB))`)
 
@@ -207,25 +210,6 @@ func Run(o Options) (*Report, error) {
 			dstIdx = nil
 		}
 		dstEntry, dstExists := dstMap[scan.PathKey(f.Rel)]
-		dstFresh := false
-
-		// 目标侧索引必须与目标文件现状一致，否则重扫，避免按过期哈希算区间
-		if dstExists {
-			dstFresh = dstIdx != nil &&
-				dstIdx.Size == uint64(dstEntry.Size) &&
-				dstIdx.MtimeNano == dstEntry.MtimeNano &&
-				dstIdx.LB == uint32(o.LB) && dstIdx.SB == uint32(o.SB)
-			if !dstFresh {
-				dres, err := scan.ScanFull(absDstFile, o.LB, o.SB, w)
-				if err != nil {
-					return nil, fmt.Errorf("读取目标文件 %s 失败: %w", f.Rel, err)
-				}
-				dstIdx = dres.New
-				rep.BytesRead += dres.ScannedBytes
-			}
-		} else {
-			dstIdx = nil
-		}
 
 		srcFresh := !o.Full && srcIdx != nil &&
 			srcIdx.Size == uint64(f.Size) && srcIdx.MtimeNano == f.MtimeNano &&
@@ -248,6 +232,38 @@ func Run(o Options) (*Report, error) {
 			default:
 				srcWhy = "源索引不可用"
 			}
+		}
+
+		// 目标侧索引必须与目标文件现状一致，否则重扫，避免按过期哈希算区间
+		dstFresh := dstExists && dstIdx != nil &&
+			dstIdx.Size == uint64(dstEntry.Size) &&
+			dstIdx.MtimeNano == dstEntry.MtimeNano &&
+			dstIdx.LB == uint32(o.LB) && dstIdx.SB == uint32(o.SB)
+
+		// 任何整文件读取开始前先出一行：大文件要读几分钟，否则界面只有开始提示。
+		// 读取量为 0 时（空文件、无需重扫的目标）不会实际读盘，不输出这一行。
+		readSize := int64(0)
+		if !srcFresh {
+			readSize = f.Size
+		}
+		if dstExists && !dstFresh && dstEntry.Size > readSize {
+			readSize = dstEntry.Size
+		}
+		if readSize > 0 {
+			fmt.Fprintf(out, "[%d/%d] %s  %s  %s\n", i+1, total, CalcMarker, f.Rel, scan.FormatSize(uint64(readSize)))
+		}
+
+		if dstExists {
+			if !dstFresh {
+				dres, err := scan.ScanFull(absDstFile, o.LB, o.SB, w)
+				if err != nil {
+					return nil, fmt.Errorf("读取目标文件 %s 失败: %w", f.Rel, err)
+				}
+				dstIdx = dres.New
+				rep.BytesRead += dres.ScannedBytes
+			}
+		} else {
+			dstIdx = nil
 		}
 
 		copied := false
@@ -296,29 +312,28 @@ func Run(o Options) (*Report, error) {
 		// 目标缺失或长度不同时，即使没有变化块也要写一次：覆盖空文件与截断到 0 的情况
 		needWrite := changedBytes > 0 || !dstExists || (dstIdx != nil && dstIdx.Size != uint64(f.Size))
 
+		// 结果只有新增、更新、删除三类；变短与清空并入更新，用说明区分
 		status, detail := "无变化", ""
 		if needWrite {
 			rep.FilesChanged++
-			switch {
-			case !dstExists:
+			if !dstExists {
 				status = "新增"
-				detail = fmt.Sprintf("（%s）", scan.FormatSize(uint64(f.Size)))
-			case changedBytes > 0:
+				detail = scan.FormatSize(uint64(f.Size))
+			} else {
 				status = "更新"
-				detail = fmt.Sprintf("变化块 %s（文件共 %s）", scan.FormatSize(changedBytes), scan.FormatSize(uint64(f.Size)))
-			case f.Size == 0:
-				status = "清空"
-			default:
-				status = "截断"
-				detail = "截断到 " + scan.FormatSize(uint64(f.Size))
+				if changedBytes > 0 {
+					detail = fmt.Sprintf("变化 %s / 共 %s", scan.FormatSize(changedBytes), scan.FormatSize(uint64(f.Size)))
+				} else {
+					detail = "截断到 " + scan.FormatSize(uint64(f.Size))
+				}
 			}
 		}
 		fmt.Fprintf(out, "[%d/%d] %s  %s", i+1, total, status, f.Rel)
+		if srcWhy != "" {
+			fmt.Fprintf(out, "  （%s）", srcWhy)
+		}
 		if detail != "" {
 			fmt.Fprintf(out, "  %s", detail)
-		}
-		if srcWhy != "" {
-			fmt.Fprintf(out, "（%s）", srcWhy)
 		}
 		fmt.Fprintln(out)
 
@@ -335,12 +350,14 @@ func Run(o Options) (*Report, error) {
 					if err := copyRanges(absSrcFile, absDstFile, ranges, int64(newIdx.Size), f.MtimeNano); err != nil {
 						return nil, fmt.Errorf("写入 %s 失败: %w", f.Rel, err)
 					}
+					rep.BytesRead += changedBytes
 				}
 				if o.Verify {
 					got, err := scan.ScanFull(absDstFile, o.LB, o.SB, w)
 					if err != nil {
 						return nil, fmt.Errorf("校验 %s 失败: %w", f.Rel, err)
 					}
+					rep.BytesRead += got.ScannedBytes
 					if !got.New.EqualContent(newIdx) {
 						return nil, fmt.Errorf("校验失败：%s 写入后内容与源不一致", f.Rel)
 					}
@@ -375,7 +392,7 @@ func Run(o Options) (*Report, error) {
 		abs := filepath.Join(o.Target, filepath.FromSlash(f.Rel))
 		idx := len(srcFiles) + j + 1
 		rep.FilesDeleted++
-		fmt.Fprintf(out, "[%d/%d] 删除  %s（源端已不存在）\n", idx, total, f.Rel)
+		fmt.Fprintf(out, "[%d/%d] 删除  %s  （源端已不存在）\n", idx, total, f.Rel)
 		if o.DryRun {
 			markDone(idx, f.Rel)
 			continue
@@ -581,7 +598,7 @@ func saveIndex(store *index.Store, rel string, f *index.File, mtime int64) error
 	return store.Save(rel, f)
 }
 
-// copyRanges 按区间从源文件拷到目标文件，最后截断到源长度并还原修改时间。
+// copyRanges 按区间从源文件复制到目标文件，最后截断到源长度并还原修改时间。
 func copyRanges(srcPath, dstPath string, ranges []scan.Range, size int64, mtimeNano int64) error {
 	sf, err := os.Open(srcPath)
 	if err != nil {

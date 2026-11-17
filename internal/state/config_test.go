@@ -218,7 +218,7 @@ func TestMigrateExcludesFollowsProfileDirs(t *testing.T) {
 
 	c.MigrateExcludes(`C:\a`, `E:\a`, `D:\a`, `F:\a`, "A")
 	if got := c.ExcludesFor(`C:\a`, `E:\a`); got != nil {
-		t.Fatalf("旧目录对的规则应被搬走，实际 %v", got)
+		t.Fatalf("旧目录对的规则应被删除，实际 %v", got)
 	}
 	if got := c.ExcludesFor(`D:\a`, `F:\a`); len(got) != 1 || got[0] != `\Cache\` {
 		t.Fatalf("新目录对应带上规则，实际 %v", got)

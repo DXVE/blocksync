@@ -212,7 +212,10 @@ func TestProgressOfIgnoresDoneLines(t *testing.T) {
 	if _, _, ok := progressOf("[2/7] 完成  a.vmdk"); ok {
 		t.Fatal("完成行不应推进进度")
 	}
-	if c, n, ok := progressOf("[2/7] 更新  a.vmdk  变化块 1 MiB"); !ok || c != 2 || n != 7 {
+	if c, n, ok := progressOf("[2/7] 哈希计算  a.vmdk  1 MiB"); !ok || c != 2 || n != 7 {
+		t.Fatalf("哈希计算行应推进进度: c=%d n=%d ok=%v", c, n, ok)
+	}
+	if c, n, ok := progressOf("[2/7] 更新  a.vmdk  （源文件修改时间变化）  变化 1 MiB / 共 2 MiB"); !ok || c != 2 || n != 7 {
 		t.Fatalf("进度行解析错误: c=%d n=%d ok=%v", c, n, ok)
 	}
 	if _, _, ok := progressOf("完成：扫描 7 个，改动 4 个"); ok {
@@ -260,12 +263,14 @@ func TestParseTableRow(t *testing.T) {
 		amount string
 		done   bool
 	}{
-		{"[2/7] 更新  24H2-Windows11-cl1/x-s001.vmdk  变化块 327.3 MiB（文件共 1.2 GiB）（源文件修改时间变化）",
-			"更新", "24H2-Windows11-cl1/x-s001.vmdk", "327.3 MiB / 1.2 GiB", false},
-		{"[4/7] 新增  sub/new.vmdk  （23.1 MiB）", "新增", "sub/new.vmdk", "23.1 MiB", false},
-		{"[5/7] 无变化  vmware.log（源索引不存在）", "无变化", "vmware.log", "—", false},
-		{"[6/7] 截断  big.bin  截断到 12.0 MiB", "截断", "big.bin", "12.0 MiB", false},
-		{"[7/7] 删除  old.bin（源端已不存在）", "删除", "old.bin", "—", false},
+		{"[2/7] 哈希计算  24H2-Windows11-cl1/x-s001.vmdk  1.2 GiB",
+			"哈希计算", "24H2-Windows11-cl1/x-s001.vmdk", "1.2 GiB", false},
+		{"[2/7] 更新  24H2-Windows11-cl1/x-s001.vmdk  （源文件修改时间变化）  变化 327.3 MiB / 共 1.2 GiB",
+			"更新", "24H2-Windows11-cl1/x-s001.vmdk", "变化 327.3 MiB / 共 1.2 GiB", false},
+		{"[4/7] 新增  sub/new.vmdk  23.1 MiB", "新增", "sub/new.vmdk", "23.1 MiB", false},
+		{"[5/7] 无变化  vmware.log  （源索引不存在）", "无变化", "vmware.log", "—", false},
+		{"[6/7] 更新  big.bin  截断到 12.0 MiB", "更新", "big.bin", "截断到 12.0 MiB", false},
+		{"[7/7] 删除  old.bin  （源端已不存在）", "删除", "old.bin", "—", false},
 		{"[7/7] 完成  old.bin", "完成", "old.bin", "", true},
 	}
 	for _, c := range cases {
@@ -283,8 +288,8 @@ func TestParseTableRow(t *testing.T) {
 }
 
 func TestFormatTableRow(t *testing.T) {
-	row := tableRow{idx: "[2/7]", status: "更新", path: "a.vmdk", amount: "1.0 MiB / 2.0 MiB"}
-	if got, want := formatTableRow(row, "a.vmdk", true), "[2/7]\t更新\ta.vmdk\t1.0 MiB / 2.0 MiB\t完成"; got != want {
+	row := tableRow{idx: "[2/7]", status: "更新", path: "a.vmdk", amount: "变化 1.0 MiB / 共 2.0 MiB"}
+	if got, want := formatTableRow(row, "a.vmdk", true), "[2/7]\t更新\ta.vmdk\t变化 1.0 MiB / 共 2.0 MiB\t完成"; got != want {
 		t.Fatalf("行格式错误: %q", got)
 	}
 	if got := formatTableRow(row, "a.vmdk", false); strings.HasSuffix(got, "完成") {
@@ -327,7 +332,7 @@ func TestLogTabColumnsAlign(t *testing.T) {
 	pSelectObject.Call(hMeasureDC, uintptr(uiFont))
 
 	h, _, _ := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(u16("EDIT"))), 0,
-		wsPopup|wsVisible|esMultiline|esAutovscroll|esAutohscroll|esReadonly, 0, 0, 760, 292, 0, 0, hInst, 0)
+		wsPopup|wsVisible|esMultiline|esAutovscroll|esAutohscroll|esReadonly, 0, 0, 1100, 292, 0, 0, hInst, 0)
 	if h == 0 {
 		t.Skip("无法创建编辑框")
 	}
@@ -340,7 +345,7 @@ func TestLogTabColumnsAlign(t *testing.T) {
 	}()
 
 	setupLogColumns()
-	const line = "[1/7]\t无变化\taaaaaaaaaa\t1.0 MiB / 2.0 GiB\t完成"
+	const line = "[1/7]\t无变化\taaaaaaaaaa\t变化 1.0 MiB / 共 2.0 GiB\t完成"
 	setText(hLog, line)
 
 	// EM_POSFROMCHAR 取每个字段首字符的 x 坐标（低 16 位）
@@ -351,9 +356,9 @@ func TestLogTabColumnsAlign(t *testing.T) {
 	var rc rect
 	pGetClientRect.Call(uintptr(hLog), uintptr(unsafe.Pointer(&rc)))
 	w := int(rc.right - rc.left)
-	want := []int{int(float64(w) * 0.10), int(float64(w) * 0.20), int(float64(w) * 0.71)}
-	// 字段首字符在行内的索引：无=4, a=src 起点, 1=数量起点, 完=完成起点
-	pos := []int{len([]rune("[1/7]\t")), len([]rune("[1/7]\t无变化\t")), len([]rune("[1/7]\t无变化\taaaaaaaaaa\t")), len([]rune("[1/7]\t无变化\taaaaaaaaaa\t1.0 MiB / 2.0 GiB\t"))}
+	want := []int{int(float64(w) * 0.08), int(float64(w) * 0.22), int(float64(w) * 0.69)}
+	// 字段首字符在行内的索引：无=4, a=src 起点, 变=数量起点, 完=完成起点
+	pos := []int{len([]rune("[1/7]\t")), len([]rune("[1/7]\t无变化\t")), len([]rune("[1/7]\t无变化\taaaaaaaaaa\t")), len([]rune("[1/7]\t无变化\taaaaaaaaaa\t变化 1.0 MiB / 共 2.0 GiB\t"))}
 	for i, p := range pos[:3] {
 		got := xAt(p)
 		if got < want[i]-3 || got > want[i]+3 {
@@ -366,7 +371,7 @@ func TestLogTabColumnsAlign(t *testing.T) {
 	}
 }
 
-// 结果行立即显示，随后同号完成行覆盖这一行补上完成列；孤立完成行原样追加。
+// 哈希计算行与同号结果行就地替换，完成行再补完成列；普通行之后不再覆盖。
 func TestLogTableAppendsThenCompletes(t *testing.T) {
 	var got []string
 	sink := rowSink{
@@ -375,33 +380,39 @@ func TestLogTableAppendsThenCompletes(t *testing.T) {
 	}
 	var table logTable
 
-	r1, _ := parseTableRow("[1/2] 更新  a.vmdk  变化块 1.0 MiB（文件共 2.0 MiB）")
+	calc, _ := parseTableRow("[1/2] 哈希计算  a.vmdk  2.0 MiB")
+	table.start(calc, sink)
+	if len(got) != 1 || got[0] != "A [1/2]	哈希计算	a.vmdk	2.0 MiB" {
+		t.Fatalf("哈希计算行应立即显示，实际 %q", got)
+	}
+
+	r1, _ := parseTableRow("[1/2] 更新  a.vmdk  （源文件长度变化）  变化 1.0 MiB / 共 2.0 MiB")
 	table.start(r1, sink)
-	if len(got) != 1 || got[0] != "A [1/2]	更新	a.vmdk	1.0 MiB / 2.0 MiB" {
-		t.Fatalf("结果行应立即显示且不带完成列，实际 %q", got)
+	if want := "R [1/2]	更新	a.vmdk	变化 1.0 MiB / 共 2.0 MiB"; len(got) != 2 || got[1] != want {
+		t.Fatalf("同序号结果行应覆盖哈希计算行，期望 %q，实际 %q", want, got)
 	}
 
 	table.finish("[1/2]", "[1/2] 完成  a.vmdk", sink)
-	if want := "R [1/2]	更新	a.vmdk	1.0 MiB / 2.0 MiB	完成"; len(got) != 2 || got[1] != want {
+	if want := "R [1/2]	更新	a.vmdk	变化 1.0 MiB / 共 2.0 MiB	完成"; len(got) != 3 || got[2] != want {
 		t.Fatalf("完成行应覆盖同一行并补完成列，期望 %q，实际 %q", want, got)
 	}
 
 	// 已完结的行不再被覆盖：后面的行一律追加
 	r2, _ := parseTableRow("[2/2] 无变化  b.log")
 	table.start(r2, sink)
-	if len(got) != 3 || !strings.HasPrefix(got[2], "A [2/2]	无变化	b.log") {
+	if len(got) != 4 || !strings.HasPrefix(got[3], "A [2/2]	无变化	b.log") {
 		t.Fatalf("新行应追加，实际 %q", got)
 	}
 
 	// 被普通行打断（close）后，即使序号相同也不再覆盖
 	table.close()
 	table.start(r2, sink)
-	if len(got) != 4 || !strings.HasPrefix(got[3], "A ") {
+	if len(got) != 5 || !strings.HasPrefix(got[4], "A ") {
 		t.Fatalf("普通行之后应重新追加，实际 %q", got)
 	}
 
 	table.finish("[9/9]", "[9/9] 完成  x", sink)
-	if len(got) != 5 || got[4] != "A [9/9] 完成  x" {
+	if len(got) != 6 || got[5] != "A [9/9] 完成  x" {
 		t.Fatalf("孤立完成行应原样追加，实际 %q", got)
 	}
 }
@@ -411,12 +422,12 @@ func TestReplaceLastLogLineOverwritesTail(t *testing.T) {
 	logEdit, cleanup := newTestLogEdit(t)
 	defer cleanup()
 
-	appendLogText([]string{"表头", "[1/2]\t更新\ta.vmdk\t1.0 MiB / 2.0 GiB"})
-	replaceLastLogLine("[1/2]\t更新\ta.vmdk\t1.5 MiB / 4.0 GiB")
-	replaceLastLogLine("[1/2]\t更新\ta.vmdk\t1.0 MiB / 2.0 GiB\t完成")
+	appendLogText([]string{"表头", "[1/2]\t更新\ta.vmdk\t变化 1.0 MiB / 共 2.0 MiB"})
+	replaceLastLogLine("[1/2]\t更新\ta.vmdk\t变化 1.5 MiB / 共 4.0 MiB")
+	replaceLastLogLine("[1/2]\t更新\ta.vmdk\t变化 1.0 MiB / 共 2.0 MiB\t完成")
 
 	got := getText(logEdit)
-	want := "表头\r\n[1/2]\t更新\ta.vmdk\t1.0 MiB / 2.0 GiB\t完成\r\n"
+	want := "表头\r\n[1/2]\t更新\ta.vmdk\t变化 1.0 MiB / 共 2.0 MiB\t完成\r\n"
 	if got != want {
 		t.Fatalf("末尾行应被覆盖，实际:\n%q", got)
 	}
@@ -450,13 +461,18 @@ func TestLogQueueShowsRowThenCompletes(t *testing.T) {
 		flushPendingLog()
 	}
 
-	step("[1/2] 更新  a.vmdk  变化块 6.0 MiB（文件共 240.0 MiB）（源文件修改时间变化）")
-	if want := "同步任务开始…\r\n[1/2]\t更新\ta.vmdk\t6.0 MiB / 240.0 MiB\r\n"; getText(hLog) != want {
-		t.Fatalf("结果行应在完成前就显示，实际:\n%q", getText(hLog))
+	step("[1/2] 哈希计算  a.vmdk  240.0 MiB")
+	if want := "同步任务开始…\r\n[1/2]\t哈希计算\ta.vmdk\t240.0 MiB\r\n"; getText(hLog) != want {
+		t.Fatalf("哈希计算行应立即显示，实际:\n%q", getText(hLog))
+	}
+
+	step("[1/2] 更新  a.vmdk  （源文件修改时间变化）  变化 6.0 MiB / 共 240.0 MiB")
+	if want := "同步任务开始…\r\n[1/2]\t更新\ta.vmdk\t变化 6.0 MiB / 共 240.0 MiB\r\n"; getText(hLog) != want {
+		t.Fatalf("结果行应覆盖哈希计算行，实际:\n%q", getText(hLog))
 	}
 
 	step("[1/2] 完成  a.vmdk")
-	want := "同步任务开始…\r\n[1/2]\t更新\ta.vmdk\t6.0 MiB / 240.0 MiB\t完成\r\n"
+	want := "同步任务开始…\r\n[1/2]\t更新\ta.vmdk\t变化 6.0 MiB / 共 240.0 MiB\t完成\r\n"
 	if got := getText(hLog); got != want {
 		t.Fatalf("完成列应补在同一行上，实际:\n%q", got)
 	}
