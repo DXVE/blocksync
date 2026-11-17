@@ -436,7 +436,7 @@ func TestIndexesNotRewrittenAfterUpdate(t *testing.T) {
 	}
 }
 
-// 哈希计算行后紧跟同号结果行，结果行后紧跟同号完成行；dry-run 也一样。
+// 哈希计算行后紧跟同号结果行；真同步在结果行后补同号完成行，dry-run 不补。
 func TestProgressLinesGetDoneMarker(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src")
@@ -456,31 +456,44 @@ func TestProgressLinesGetDoneMarker(t *testing.T) {
 			t.Fatal(err)
 		}
 		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-		results, calcs := 0, 0
-		for i := 0; i+1 < len(lines); i++ {
+		results, calcs, done := 0, 0, 0
+		for i := 0; i < len(lines); i++ {
 			m := ProgressPattern.FindStringSubmatch(lines[i])
 			if m == nil {
 				continue
 			}
 			status := strings.TrimSpace(m[3])
-			n := ProgressPattern.FindStringSubmatch(lines[i+1])
+			var next []string
+			if i+1 < len(lines) {
+				next = ProgressPattern.FindStringSubmatch(lines[i+1])
+			}
 			switch {
 			case strings.HasPrefix(status, CalcMarker):
-				if n == nil || n[1] != m[1] || strings.HasPrefix(strings.TrimSpace(n[3]), DoneMarker) ||
-					strings.HasPrefix(strings.TrimSpace(n[3]), CalcMarker) {
+				if next == nil || next[1] != m[1] || strings.HasPrefix(strings.TrimSpace(next[3]), DoneMarker) ||
+					strings.HasPrefix(strings.TrimSpace(next[3]), CalcMarker) {
 					t.Fatalf("哈希计算行后应紧跟同号结果行，实际输出:\n%s", out.String())
 				}
 				calcs++
 			case strings.HasPrefix(status, DoneMarker):
+				done++
 			default:
-				if n == nil || !strings.HasPrefix(strings.TrimSpace(n[3]), DoneMarker) || n[1] != m[1] {
+				results++
+				if dry {
+					continue
+				}
+				if next == nil || !strings.HasPrefix(strings.TrimSpace(next[3]), DoneMarker) || next[1] != m[1] {
 					t.Fatalf("进度行后应紧跟同号完成行，实际输出:\n%s", out.String())
 				}
-				results++
 			}
 		}
 		if results != 2 || calcs != 2 {
 			t.Fatalf("dry=%v 时应有 2 个结果行与 2 个哈希计算行，实际 %d / %d，输出:\n%s", dry, results, calcs, out.String())
+		}
+		if dry && done != 0 {
+			t.Fatalf("dry-run 不应输出完成行，实际 %d 行，输出:\n%s", done, out.String())
+		}
+		if !dry && done != 2 {
+			t.Fatalf("真同步应有 2 个完成行，实际 %d，输出:\n%s", done, out.String())
 		}
 	}
 	check(true)

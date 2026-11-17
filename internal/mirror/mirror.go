@@ -186,7 +186,11 @@ func Run(o Options) (*Report, error) {
 	total := len(srcFiles) + len(dels)
 	// 进度行在处理前打印，写入与校验期间没有输出；完成行在处理结束后补上，
 	// 让“正在处理”和“已处理完”有明确边界，也便于判断卡在哪个文件。
+	// dry-run 没有写入动作，结果行就是最终状态，不再补完成行。
 	markDone := func(idx int, rel string) {
+		if o.DryRun {
+			return
+		}
 		fmt.Fprintf(out, "[%d/%d] %s  %s\n", idx, total, DoneMarker, rel)
 	}
 	// 首个文件可能长时间无输出，先报一行，避免被误认为卡死
