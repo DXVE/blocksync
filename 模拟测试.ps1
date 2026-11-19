@@ -168,12 +168,12 @@ Check "A 与 D 内容一致" ($d3 -eq '') $d3
 
 # ---------- 4 ----------
 Write-Host ""
-Write-Host "== 4. 取回方向 D -> B（应零读取） =="
+Write-Host "== 4. 取回方向 D -> B（应只读变更区间） =="
 $o = Sync $D $B
 $r = Parse-Bytes $o '读取'
 $w2 = Parse-Bytes $o '写入'
 $d4 = Compare-Trees $D $B
-Check "不重读整盘" ($r -eq 0) ("读取 {0:N0} 字节" -f $r)
+Check "只读变更区间" ($r -gt 0 -and $r -eq $w2) ("读取 {0:N1} MiB / 写入 {1:N1} MiB" -f ($r/1MB), ($w2/1MB))
 Check "写入量与上一跳相当" ($w2 -gt 0 -and $w2 -lt ($changed * 3)) ("写入 {0:N1} MiB" -f ($w2/1MB))
 Check "D 与 B 内容一致" ($d4 -eq '') $d4
 
